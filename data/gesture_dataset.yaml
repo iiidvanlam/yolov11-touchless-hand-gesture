@@ -1,0 +1,17 @@
+# Cấu hình Dataset YOLOv8/YOLOv11 cho Điều khiển Thiết bị Không chạm (Touchless Control)
+path: ../datasets/hand_gestures  # Thư mục gốc chứa dữ liệu
+train: images/train
+val: images/val
+test: images/test
+
+# 7 lớp cử chỉ điều khiển hệ thống trực quan
+nc: 7
+
+names:
+  0: OPEN_PALM      # Play / Pause Media
+  1: FIST           # Mute / Unmute Audio
+  2: THUMBS_UP      # Tăng âm lượng (+5%)
+  3: THUMBS_DOWN    # Giảm âm lượng (-5%)
+  4: POINT_RIGHT    # Bài tiếp theo / Tua tới (Next Track)
+  5: POINT_LEFT     # Bài trước đó / Tua lùi (Prev Track)
+  6: PEACE          # Chụp ảnh màn hình (Screenshot)

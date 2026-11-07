@@ -1,0 +1,18 @@
+# Cấu hình Dataset YOLOv11-Pose (21 Keypoints Bàn tay)
+# Chuẩn 21 điểm khớp xương bàn tay (0: Cổ tay, 1-4: Ngón cái, 5-8: Ngón trỏ, 9-12: Ngón giữa, 13-16: Ngón áp út, 17-20: Ngón út)
+
+path: ../datasets/hand-keypoints
+train: images/train
+val: images/val
+test: images/test
+
+# 21 điểm khớp xương, mỗi điểm gồm (x, y, visibility)
+kpt_shape: [21, 3]
+
+# Giữ nguyên thứ tự 21 khớp khi lật ảnh ngang (Horizontal Flip Augmentation)
+flip_idx: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+
+# Nếu train model phát hiện bàn tay tổng quát (1 class) kết hợp phân loại hình học/MLP từ 21 keypoints:
+nc: 1
+names:
+  0: hand

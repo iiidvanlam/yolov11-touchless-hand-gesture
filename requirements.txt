@@ -1,0 +1,19 @@
+# AI & Computer Vision
+ultralytics>=8.3.0
+opencv-python>=4.10.0
+numpy>=1.26.0
+onnxruntime>=1.19.0
+
+# Desktop GUI
+customtkinter>=5.2.2
+Pillow>=10.4.0
+
+# Windows Touchless Control (Audio, Media Keys, Brightness)
+pycaw>=20240210
+comtypes>=1.4.0
+pynput>=1.7.7
+pyautogui>=0.9.54
+screen-brightness-control>=0.23.0
+
+# Text-to-Speech (Sign Language A-Z Reader)
+pyttsx3>=2.90

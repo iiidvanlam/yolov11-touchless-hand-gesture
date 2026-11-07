@@ -1,0 +1,6 @@
+path: D:/NhanDienCuChiTay/datasets/hand-keypoints
+train: train_fast.txt
+val: val_subset.txt
+kpt_shape: [21, 3]
+names:
+  0: hand
