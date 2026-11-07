@@ -1,11 +1,12 @@
 # AI & Computer Vision
 ultralytics>=8.3.0
+mediapipe>=0.10.0
 opencv-python>=4.10.0
 numpy>=1.26.0
 onnxruntime>=1.19.0
 
-# Desktop GUI
-customtkinter>=5.2.2
+# Desktop GUI (PyQt6 Modern Dark UI)
+PyQt6>=6.6.0
 Pillow>=10.4.0
 
 # Windows Touchless Control (Audio, Media Keys, Brightness)
