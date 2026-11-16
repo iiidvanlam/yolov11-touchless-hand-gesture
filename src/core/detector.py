@@ -48,6 +48,7 @@ class YoloPoseHandDetector:
         self.model_loaded_name = "Chưa nạp model"
         self.analyzer = HandPoseAnalyzer()
         self.kpt_smoother = OneEuroKeypointSmoother(min_cutoff=1.4, beta=0.035)
+        self.last_raw_kpts: Optional[np.ndarray] = None
 
         self._init_mediapipe_refiner()
         self.load_model(model_path)
@@ -286,7 +287,11 @@ class YoloPoseHandDetector:
 
         if final_kpts is None or final_bbox is None:
             self.kpt_smoother.reset()
+            self.last_raw_kpts = None
             return annotated, analyses
+
+        # Lưu tọa độ thô (trước lọc) để vẽ biểu đồ Telemetry so sánh Raw vs 1€
+        self.last_raw_kpts = final_kpts.copy()
 
         # Stage 3: Bộ lọc thích ứng One-Euro Filter (1€ Filter) chống rung tuyệt đối
         smoothed_kpts = self.kpt_smoother.update(final_kpts)

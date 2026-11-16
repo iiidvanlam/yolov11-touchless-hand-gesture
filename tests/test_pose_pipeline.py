@@ -1,6 +1,8 @@
 import unittest
 import numpy as np
 
+from src.controllers.air_mouse import AirMouseController, map_to_region
+from src.controllers.presentation_controller import PresentationController
 from src.controllers.sign_translator import SignLanguageTranslator
 from src.core.pose_analyzer import HandPoseAnalyzer
 from src.core.smoother import CommandCooldown, VotingBuffer
@@ -69,6 +71,25 @@ class TestPosePipeline(unittest.TestCase):
         self.assertIn("HELLO", suggs)
         tr.apply_suggestion("HELLO")
         self.assertEqual(tr.text_buffer, "HELLO ")
+
+    def test_air_mouse_mapping_and_states(self) -> None:
+        nx, ny = map_to_region(320, 210, 640, 480)
+        self.assertTrue(0.0 <= nx <= 1.0 and 0.0 <= ny <= 1.0)
+
+        kpts = self._make_open_palm_keypoints()
+        mouse = AirMouseController()
+        mouse._move = lambda x, y: None  # tránh di chuyển chuột thật khi chạy unit test
+        mouse._mouse = lambda flag: None
+        info = mouse.update(kpts, 640, 480)
+        self.assertEqual(info["state"], "MOVE")
+
+    def test_presentation_laser_mode(self) -> None:
+        kpts = self._make_open_palm_keypoints()
+        pres = PresentationController()
+        # Chỉ ngón trỏ mở [0, 1, 0, 0, 0] -> chế độ LASER
+        res = pres.update(kpts, [0, 1, 0, 0, 0], 640, 480)
+        self.assertEqual(res["state"], "LASER")
+        self.assertIsNotNone(res["laser"])
 
 
 if __name__ == "__main__":

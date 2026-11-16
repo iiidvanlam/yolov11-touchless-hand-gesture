@@ -1,4 +1,6 @@
 import os
+import time
+from collections import deque
 from typing import List, Optional
 import cv2
 import numpy as np
@@ -23,8 +25,12 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from src.controllers.air_mouse import DEFAULT_ACTIVE_REGION, AirMouseController
 from src.controllers.media_controller import WindowsMediaController
+from src.controllers.presentation_controller import PresentationController
 from src.controllers.sign_translator import SignLanguageTranslator
+from src.ui.laser_overlay import LaserOverlay
+from src.ui.telemetry_widget import TelemetryChart
 from src.core.camera import ThreadedCamera
 from src.core.detector import YoloPoseHandDetector
 from src.core.pose_analyzer import HandPoseAnalysis, HandPoseAnalyzer
@@ -122,11 +128,22 @@ class SignAndGestureApp(QMainWindow):
 
     MODE_ASL = 0
     MODE_TOUCHLESS = 1
+    MODE_AIR_MOUSE = 2
+    MODE_PRESENTATION = 3
 
     def __init__(self):
         super().__init__()
         self.setWindowTitle("YOLOv11-Pose: Nhận diện Ngôn ngữ Ký hiệu (A-Z) & Điều khiển Không chạm")
-        self.resize(1240, 760)
+        self.resize(1280, 880)
+
+        # Module chế độ mới: Chuột không chạm & Thuyết trình
+        self.air_mouse = AirMouseController()
+        self.presenter = PresentationController()
+        self.laser_overlay = LaserOverlay()
+
+        # Bộ đệm số liệu đo jitter thực tế (Keypoint 8, trục Y)
+        self._raw_hist: deque = deque(maxlen=45)
+        self._smooth_hist: deque = deque(maxlen=45)
         self.setStyleSheet(DARK_STYLESHEET)
 
         # Khởi tạo các module cốt lõi
@@ -182,9 +199,25 @@ class SignAndGestureApp(QMainWindow):
         # Khung hiển thị Video
         self.video_label = QLabel("Đang kết nối Webcam...")
         self.video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.video_label.setMinimumSize(680, 500)
+        self.video_label.setMinimumSize(640, 400)
         self.video_label.setStyleSheet("background-color: #020617; border-radius: 8px; color: #64748b; font-size: 16px;")
         cam_layout.addWidget(self.video_label, stretch=1)
+
+        # Biểu đồ Telemetry thời gian thực
+        self.chart_kpt = TelemetryChart(
+            "ĐẦU NGÓN TRỎ (Kpt 8) - TRỤC Y (px)",
+            [("Raw", "#94a3b8"), ("1€ Filter", "#ef4444")],
+            unit="",
+        )
+        self.chart_perf = TelemetryChart(
+            "HIỆU NĂNG",
+            [("FPS", "#38bdf8"), ("Suy luận ms", "#f59e0b")],
+            unit="",
+        )
+        charts_row = QHBoxLayout()
+        charts_row.addWidget(self.chart_kpt, stretch=3)
+        charts_row.addWidget(self.chart_perf, stretch=2)
+        cam_layout.addLayout(charts_row)
 
         # Thanh nút điều khiển Camera & Nạp Model
         cam_btn_bar = QHBoxLayout()
@@ -214,17 +247,20 @@ class SignAndGestureApp(QMainWindow):
         lbl_mode_title.setStyleSheet("color: #94a3b8;")
         mode_layout.addWidget(lbl_mode_title)
 
-        mode_btns = QHBoxLayout()
-        self.btn_mode_asl = QPushButton("1. Ngôn ngữ Ký hiệu (A-Z)")
-        self.btn_mode_asl.setObjectName("ModeActive")
-        self.btn_mode_asl.clicked.connect(lambda: self._switch_mode(self.MODE_ASL))
-
-        self.btn_mode_ctrl = QPushButton("2. Điều khiển Không chạm")
-        self.btn_mode_ctrl.setObjectName("ModeInactive")
-        self.btn_mode_ctrl.clicked.connect(lambda: self._switch_mode(self.MODE_TOUCHLESS))
-
-        mode_btns.addWidget(self.btn_mode_asl)
-        mode_btns.addWidget(self.btn_mode_ctrl)
+        mode_btns = QGridLayout()
+        mode_defs = [
+            (self.MODE_ASL, "1. Ngôn ngữ Ký hiệu (A-Z)"),
+            (self.MODE_TOUCHLESS, "2. Điều khiển Media"),
+            (self.MODE_AIR_MOUSE, "3. Chuột không chạm"),
+            (self.MODE_PRESENTATION, "4. Thuyết trình (Laser)"),
+        ]
+        self.mode_buttons = {}
+        for idx, (mode_id, text) in enumerate(mode_defs):
+            btn = QPushButton(text)
+            btn.setObjectName("ModeActive" if mode_id == self.MODE_ASL else "ModeInactive")
+            btn.clicked.connect(lambda _=False, m=mode_id: self._switch_mode(m))
+            mode_btns.addWidget(btn, idx // 2, idx % 2)
+            self.mode_buttons[mode_id] = btn
         mode_layout.addLayout(mode_btns)
         right_col.addWidget(mode_card)
 
@@ -256,6 +292,8 @@ class SignAndGestureApp(QMainWindow):
         self.stacked_panels = QStackedWidget()
         self.stacked_panels.addWidget(self._create_asl_panel())
         self.stacked_panels.addWidget(self._create_touchless_panel())
+        self.stacked_panels.addWidget(self._create_air_mouse_panel())
+        self.stacked_panels.addWidget(self._create_presentation_panel())
         right_col.addWidget(self.stacked_panels, stretch=1)
 
         root_layout.addLayout(right_col, stretch=5)
@@ -436,18 +474,117 @@ class SignAndGestureApp(QMainWindow):
         layout.addStretch()
         return card
 
+    def _create_air_mouse_panel(self) -> QWidget:
+        """Chế độ 3: Điều khiển chuột Windows bằng ngón trỏ."""
+        card = QFrame()
+        card.setObjectName("Card")
+        layout = QVBoxLayout(card)
+        layout.setSpacing(10)
+
+        title = QLabel("CHUỘT KHÔNG CHẠM (AIR MOUSE)")
+        title.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
+        title.setStyleSheet("color: #a78bfa;")
+        layout.addWidget(title)
+
+        self.chk_air_mouse = QCheckBox("Kích hoạt điều khiển con trỏ chuột (bỏ chọn để tạm dừng)")
+        self.chk_air_mouse.setChecked(False)
+        self.chk_air_mouse.toggled.connect(lambda on: None if on else self.air_mouse.release())
+        layout.addWidget(self.chk_air_mouse)
+
+        self.lbl_mouse_state = QLabel("Trạng thái: Chưa kích hoạt")
+        self.lbl_mouse_state.setStyleSheet(
+            "background-color: #0f172a; color: #a78bfa; padding: 8px; border-radius: 6px; font-weight: bold;"
+        )
+        layout.addWidget(self.lbl_mouse_state)
+
+        pinch_row = QHBoxLayout()
+        pinch_row.addWidget(QLabel("Chụm Cái-Trỏ:"))
+        self.progress_pinch_left = QProgressBar()
+        self.progress_pinch_left.setRange(0, 100)
+        self.progress_pinch_left.setFormat("%p%")
+        pinch_row.addWidget(self.progress_pinch_left, stretch=1)
+        layout.addLayout(pinch_row)
+
+        guide = QLabel(
+            "HƯỚNG DẪN:\n"
+            "• Di chuyển đầu ngón trỏ trong khung tím : Di chuyển con trỏ\n"
+            "• Chụm Cái + Trỏ nhanh rồi nhả         : Nhấp chuột trái\n"
+            "• Chụm Cái + Trỏ và giữ > 0,35 giây    : Kéo thả (Drag)\n"
+            "• Chụm Cái + Giữa (Trỏ vẫn mở)        : Nhấp chuột phải\n"
+            "• Nắm tay lại                           : Tạm dừng con trỏ để\n"
+            "                                          đặt lại vị trí tay\n\n"
+            f"Màn hình: {self.air_mouse.screen_w} x {self.air_mouse.screen_h}"
+        )
+        guide.setStyleSheet(
+            "background-color: #0f172a; color: #cbd5e1; padding: 10px; border-radius: 8px; font-size: 12px;"
+        )
+        layout.addWidget(guide)
+        layout.addStretch()
+        return card
+
+    def _create_presentation_panel(self) -> QWidget:
+        """Chế độ 4: Tia laser ảo + lật slide bằng vẫy tay."""
+        card = QFrame()
+        card.setObjectName("Card")
+        layout = QVBoxLayout(card)
+        layout.setSpacing(10)
+
+        title = QLabel("THUYẾT TRÌNH THÔNG MINH (LASER & SLIDE)")
+        title.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
+        title.setStyleSheet("color: #f87171;")
+        layout.addWidget(title)
+
+        self.chk_laser = QCheckBox("Hiển thị tia laser đỏ trên toàn màn hình")
+        self.chk_laser.setChecked(True)
+        layout.addWidget(self.chk_laser)
+
+        self.chk_swipe = QCheckBox("Cho phép lật slide bằng vẫy tay")
+        self.chk_swipe.setChecked(True)
+        layout.addWidget(self.chk_swipe)
+
+        self.lbl_present_state = QLabel("Trạng thái: Chờ cử chỉ")
+        self.lbl_present_state.setStyleSheet(
+            "background-color: #0f172a; color: #f87171; padding: 8px; border-radius: 6px; font-weight: bold;"
+        )
+        layout.addWidget(self.lbl_present_state)
+
+        self.lbl_slide_event = QLabel("Lệnh slide gần nhất: Chưa có")
+        self.lbl_slide_event.setStyleSheet(
+            "background-color: #0f172a; color: #38bdf8; padding: 8px; border-radius: 6px; font-weight: bold;"
+        )
+        layout.addWidget(self.lbl_slide_event)
+
+        guide = QLabel(
+            "HƯỚNG DẪN:\n"
+            "• Chỉ giơ ngón trỏ       : Hiện tia laser đỏ theo ngón tay\n"
+            "• Xòe tay, vẫy sang TRÁI : Slide tiếp theo (phím →)\n"
+            "• Xòe tay, vẫy sang PHẢI : Slide trước (phím ←)\n\n"
+            "Mẹo: mở PowerPoint ở chế độ trình chiếu (F5) rồi\n"
+            "bấm vào cửa sổ trình chiếu để nó nhận phím."
+        )
+        guide.setStyleSheet(
+            "background-color: #0f172a; color: #cbd5e1; padding: 10px; border-radius: 8px; font-size: 12px;"
+        )
+        layout.addWidget(guide)
+        layout.addStretch()
+        return card
+
     def _switch_mode(self, mode: int) -> None:
+        # Dọn trạng thái của chế độ cũ
+        self.air_mouse.release()
+        self.presenter.reset()
+        self.laser_overlay.set_point(None)
+        if mode == self.MODE_PRESENTATION:
+            self.laser_overlay.show()
+        else:
+            self.laser_overlay.hide()
+
         self.current_mode = mode
         self.voting_buffer.reset()
         self.progress_hold.setValue(0)
-        if mode == self.MODE_ASL:
-            self.btn_mode_asl.setObjectName("ModeActive")
-            self.btn_mode_ctrl.setObjectName("ModeInactive")
-            self.stacked_panels.setCurrentIndex(0)
-        else:
-            self.btn_mode_asl.setObjectName("ModeInactive")
-            self.btn_mode_ctrl.setObjectName("ModeActive")
-            self.stacked_panels.setCurrentIndex(1)
+        for mode_id, btn in self.mode_buttons.items():
+            btn.setObjectName("ModeActive" if mode_id == mode else "ModeInactive")
+        self.stacked_panels.setCurrentIndex(mode)
         self.setStyleSheet(DARK_STYLESHEET)
 
     def toggle_camera(self, start_only: bool = False) -> None:
@@ -485,14 +622,47 @@ class SignAndGestureApp(QMainWindow):
         self.lbl_fps.setText(f"FPS: {fps:.1f}")
         pinch_enabled = (self.current_mode == self.MODE_TOUCHLESS) and self.chk_pinch_volume.isChecked()
 
+        t_start = time.perf_counter()
         annotated, analyses = self.detector.detect(frame, pinch_mode_enabled=pinch_enabled)
+        infer_ms = (time.perf_counter() - t_start) * 1000.0
         self.last_analyses = analyses
+
+        # Cập nhật biểu đồ hiệu năng (FPS & Latency ms)
+        self.chart_perf.push([fps, infer_ms])
+        self.chart_perf.set_footer(f"FPS: {fps:.1f}  |  Độ trễ AI: {infer_ms:.1f} ms")
+
+        h_f, w_f = annotated.shape[:2]
+
+        # Nếu ở chế độ Air Mouse hoặc Thuyết trình, vẽ khung vùng hoạt động chuẩn hóa lên HUD
+        if self.current_mode in (self.MODE_AIR_MOUSE, self.MODE_PRESENTATION):
+            rx1, ry1, rx2, ry2 = DEFAULT_ACTIVE_REGION
+            p1 = (int(rx1 * w_f), int(ry1 * h_f))
+            p2 = (int(rx2 * w_f), int(ry2 * h_f))
+            box_color = (250, 139, 167) if self.current_mode == self.MODE_AIR_MOUSE else (113, 113, 248)
+            cv2.rectangle(annotated, p1, p2, box_color, 1, cv2.LINE_AA)
 
         if analyses:
             primary = analyses[0]
             self.lbl_fingers_debug.setText(
                 f"Trạng thái 5 ngón [Cái, Trỏ, Giữa, Áp, Út]: {primary.fingers_up}"
             )
+
+            # Cập nhật biểu đồ sóng Telemetry (Raw vs 1€ Filter trên đầu ngón trỏ Kpt 8)
+            smooth_y = float(primary.keypoints[8][1])
+            raw_y = (
+                float(self.detector.last_raw_kpts[8][1])
+                if self.detector.last_raw_kpts is not None
+                else smooth_y
+            )
+            self._raw_hist.append(raw_y)
+            self._smooth_hist.append(smooth_y)
+            self.chart_kpt.push([raw_y, smooth_y])
+            if len(self._raw_hist) >= 6:
+                raw_jit = float(np.std(np.diff(np.array(self._raw_hist))))
+                smt_jit = float(np.std(np.diff(np.array(self._smooth_hist))))
+                self.chart_kpt.set_footer(
+                    f"Rung ΔRaw: {raw_jit:.2f}px  →  Δ1€: {smt_jit:.2f}px"
+                )
 
             if self.current_mode == self.MODE_ASL:
                 committed, progress, candidate = self.voting_buffer.update(
@@ -506,8 +676,9 @@ class SignAndGestureApp(QMainWindow):
                     new_text = self.translator.append_symbol(committed)
                     self.txt_sentence.setText(new_text)
                     self._refresh_suggestion_buttons()
-            else:
-                # Chế độ Điều khiển Không chạm (Touchless Control)
+
+            elif self.current_mode == self.MODE_TOUCHLESS:
+                # Chế độ 2: Điều khiển Không chạm (Touchless Media Control)
                 gesture = primary.control_gesture
                 if gesture == "PINCH_VOLUME" and primary.pinch_ratio is not None:
                     smooth_ratio = self.pinch_ema.update(primary.pinch_ratio)
@@ -526,9 +697,63 @@ class SignAndGestureApp(QMainWindow):
                         if action_msg:
                             self.lbl_last_command.setText(f"Lệnh gần nhất: {action_msg}")
                             self.progress_volume.setValue(self.media_ctrl.current_volume_percent)
+
+            elif self.current_mode == self.MODE_AIR_MOUSE:
+                # Chế độ 3: Điều khiển Chuột Không Chạm (Air Mouse & Pinch Click)
+                if self.chk_air_mouse.isChecked():
+                    info = self.air_mouse.update(primary.keypoints, w_f, h_f)
+                    state = str(info["state"])
+                    ev = str(info["event"])
+                    r_left = float(info["r_left"])
+                    closeness = int(np.clip((1.0 - r_left / 0.85) * 100, 0, 100))
+                    self.progress_pinch_left.setValue(closeness)
+                    self.progress_hold.setValue(closeness)
+                    self.lbl_current_symbol.setText(f"AIR MOUSE: {state}")
+                    if ev:
+                        self.lbl_mouse_state.setText(f"Sự kiện: {ev} ({state})")
+                    else:
+                        self.lbl_mouse_state.setText(f"Trạng thái: {state}")
+
+                    # Vẽ tâm ngắm tại đầu ngón trỏ (Keypoint 8)
+                    ix, iy = int(primary.keypoints[8][0]), int(primary.keypoints[8][1])
+                    c_ring = (0, 255, 180) if state in ("LEFT_DOWN", "DRAG") else (255, 180, 0)
+                    cv2.circle(annotated, (ix, iy), 12, c_ring, 2, cv2.LINE_AA)
+                else:
+                    self.air_mouse.release()
+                    self.lbl_current_symbol.setText("Air Mouse: Đang tắt")
+                    self.progress_hold.setValue(0)
+
+            elif self.current_mode == self.MODE_PRESENTATION:
+                # Chế độ 4: Thuyết trình Thông minh (Laser đỏ & Lật Slide vẫy tay)
+                pres = self.presenter.update(primary.keypoints, primary.fingers_up, w_f, h_f)
+                p_state = str(pres["state"])
+                laser_pt = pres["laser"]
+                slide_ev = pres["event"]
+
+                if self.chk_laser.isChecked() and laser_pt is not None:
+                    self.laser_overlay.set_point(laser_pt)
+                    ix, iy = int(primary.keypoints[8][0]), int(primary.keypoints[8][1])
+                    cv2.circle(annotated, (ix, iy), 14, (40, 40, 255), 3, cv2.LINE_AA)
+                    cv2.circle(annotated, (ix, iy), 5, (255, 255, 255), -1, cv2.LINE_AA)
+                    self.lbl_current_symbol.setText("LASER POINTER: BẬT")
+                    self.lbl_present_state.setText("Trạng thái: Đang chiếu tia Laser đỏ")
+                    self.progress_hold.setValue(100)
+                else:
+                    self.laser_overlay.set_point(None)
+                    self.lbl_current_symbol.setText(f"THUYẾT TRÌNH: {p_state}")
+                    self.lbl_present_state.setText(f"Trạng thái: {p_state}")
+                    self.progress_hold.setValue(60 if p_state == "SWIPE_READY" else 0)
+
+                if slide_ev and self.chk_swipe.isChecked():
+                    self.lbl_slide_event.setText(f"Lệnh slide gần nhất: {slide_ev}")
+                    self.lbl_current_symbol.setText(str(slide_ev))
         else:
             self.voting_buffer.update(None, 0.0)
             self.cooldown_timer.check_trigger(None)
+            self.air_mouse.release()
+            self.presenter.reset()
+            self.laser_overlay.set_point(None)
+            self.chart_kpt.push([None, None])
             self.lbl_current_symbol.setText("Đang chờ bàn tay...")
             self.progress_hold.setValue(0)
             self.lbl_fingers_debug.setText("Trạng thái 5 ngón [Cái, Trỏ, Giữa, Áp, Út]: [-, -, -, -, -]")
@@ -627,5 +852,7 @@ class SignAndGestureApp(QMainWindow):
     def closeEvent(self, event) -> None:
         self.timer.stop()
         self.camera.stop()
+        self.air_mouse.release()
+        self.laser_overlay.close()
         event.accept()
 
