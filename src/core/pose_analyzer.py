@@ -227,23 +227,33 @@ class HandPoseAnalyzer:
 
         # 2. FIST (5 ngón nắm lại): Mute / Unmute Audio
         if sum(fingers) == 0:
-            # Kiểm tra xem ngón cái có đang giơ thẳng lên hoặc chúc thẳng xuống không
-            dy_thumb = kpts[4][1] - kpts[2][1]
+            # Chỉ coi là THUMBS_UP / THUMBS_DOWN khi đầu ngón cái tách hẳn khỏi khớp trỏ PIP (6)
+            # và hướng thẳng đứng rõ rệt, tránh nhận nhầm nắm đấm bình thường thành tăng âm lượng.
+            dx_thumb = abs(float(kpts[4][0] - kpts[2][0]))
+            dy_thumb = float(kpts[4][1] - kpts[2][1])
+            dist_thumb_index_pip = self._dist(kpts[4], kpts[6])
             dist_thumb_palm = self._dist(kpts[4], kpts[9])
-            if dist_thumb_palm > 0.55 * palm_size:
-                if dy_thumb < -0.28 * palm_size:
+            if (
+                dist_thumb_palm > 0.65 * palm_size
+                and dist_thumb_index_pip > 0.50 * palm_size
+                and abs(dy_thumb) > dx_thumb * 1.15
+            ):
+                if dy_thumb < -0.35 * palm_size:
                     return "THUMBS_UP", None, None
-                elif dy_thumb > 0.28 * palm_size:
+                elif dy_thumb > 0.35 * palm_size:
                     return "THUMBS_DOWN", None, None
             return "FIST", None, None
 
         # 3. THUMBS_UP / THUMBS_DOWN (Chỉ ngón cái mở, 4 ngón kia gập)
         if fingers == [1, 0, 0, 0, 0]:
-            dy = kpts[4][1] - kpts[2][1]
-            if dy < -0.18 * palm_size:
-                return "THUMBS_UP", None, None
-            elif dy > 0.18 * palm_size:
-                return "THUMBS_DOWN", None, None
+            dx = abs(float(kpts[4][0] - kpts[2][0]))
+            dy = float(kpts[4][1] - kpts[2][1])
+            dist_thumb_index_pip = self._dist(kpts[4], kpts[6])
+            if dist_thumb_index_pip > 0.45 * palm_size and abs(dy) > dx * 0.90:
+                if dy < -0.22 * palm_size:
+                    return "THUMBS_UP", None, None
+                elif dy > 0.22 * palm_size:
+                    return "THUMBS_DOWN", None, None
 
         # 4. PEACE (Ngón trỏ + Ngón giữa mở): Chụp ảnh màn hình
         if fingers == [0, 1, 1, 0, 0] or (fingers == [1, 1, 1, 0, 0] and neural_gesture == "Victory"):

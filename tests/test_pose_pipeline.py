@@ -92,6 +92,67 @@ class TestPosePipeline(unittest.TestCase):
         res = pres.update(kpts, [0, 1, 0, 0, 0], 640, 480)
         self.assertEqual(res["state"], "LASER")
         self.assertIsNotNone(res["laser"])
+    def test_pinch_volume_lock_and_rollback(self) -> None:
+        import time as _t
+        from src.core.smoother import PinchVolumeLock
+
+        # 1) Yêu cầu đủ entry_frames mới kích hoạt, sau đó giữ yên -> khóa, bỏ qua chuyển động rút tay
+        lock = PinchVolumeLock(stable_seconds=0.05, entry_frames=2)
+        val, state, _ = lock.update(0.40, pre_pinch_ratio=0.50)
+        self.assertIsNone(val)
+        self.assertEqual(state, "ARMING")
+        val, state, _ = lock.update(0.40, pre_pinch_ratio=0.50)
+        self.assertAlmostEqual(val, 0.40)
+        self.assertEqual(state, "ADJUST")
+        _t.sleep(0.07)
+        val, state, _ = lock.update(0.41)
+        self.assertEqual(state, "LOCKED")
+        val, state, _ = lock.update(0.95)  # rút tay -> ngón tách xa
+        self.assertIsNone(val)
+        self.assertEqual(state, "LOCKED")
+
+        # 2) Chưa khóa, rút tay làm ratio vọt lên -> khi rời Pinch phải hoàn tác về giá trị cũ
+        lock2 = PinchVolumeLock(stable_seconds=5.0, rollback_s=0.05, entry_frames=1, exit_frames=2)
+        lock2.update(0.30, pre_pinch_ratio=0.50)
+        _t.sleep(0.08)
+        lock2.update(0.90)  # động tác rút tay
+        self.assertIsNone(lock2.on_not_pinch())
+        rb = lock2.on_not_pinch()
+        self.assertAlmostEqual(rb, 0.30)
+
+        # 3) Nháy Pinch quá ngắn (< rollback_s) rồi thoát -> hoàn tác về pre_pinch_ratio ban đầu
+        lock3 = PinchVolumeLock(stable_seconds=5.0, rollback_s=0.5, entry_frames=2, exit_frames=2)
+        lock3.update(0.75, pre_pinch_ratio=0.40)
+        lock3.update(0.75, pre_pinch_ratio=0.40)
+        self.assertIsNone(lock3.on_not_pinch())
+        rb3 = lock3.on_not_pinch()
+        self.assertAlmostEqual(rb3, 0.40)
+
+    def test_fist_not_misclassified_as_thumbs_up(self) -> None:
+        kpts = np.zeros((21, 3), dtype=np.float32)
+        kpts[:, 2] = 0.95
+        kpts[0, :2] = [300, 400]
+        # Nắm đấm: 4 ngón gập xuống lòng bàn tay, ngón cái đặt cạnh khớp trỏ
+        kpts[1, :2] = [335, 375]
+        kpts[2, :2] = [355, 345]
+        kpts[3, :2] = [350, 320]
+        kpts[4, :2] = [330, 305]
+        for base_idx, bx in [(5, 330), (9, 300), (13, 270), (17, 240)]:
+            kpts[base_idx, :2] = [bx, 310]
+            kpts[base_idx + 1, :2] = [bx, 285]
+            kpts[base_idx + 2, :2] = [bx, 320]
+            kpts[base_idx + 3, :2] = [bx, 355]
+        res = self.analyzer.analyze((220, 270, 370, 415), kpts, det_conf=0.92)
+        self.assertEqual(res.control_gesture, "FIST")
+
+        # Giơ ngón cái thẳng đứng lên rõ rệt -> THUMBS_UP
+        kpts_up = kpts.copy()
+        kpts_up[1, :2] = [335, 360]
+        kpts_up[2, :2] = [345, 315]
+        kpts_up[3, :2] = [348, 265]
+        kpts_up[4, :2] = [350, 215]
+        res_up = self.analyzer.analyze((220, 200, 370, 415), kpts_up, det_conf=0.92)
+        self.assertEqual(res_up.control_gesture, "THUMBS_UP")
 
 
 if __name__ == "__main__":

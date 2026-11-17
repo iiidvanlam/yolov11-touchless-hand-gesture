@@ -34,7 +34,7 @@ from src.ui.telemetry_widget import TelemetryChart
 from src.core.camera import ThreadedCamera
 from src.core.detector import YoloPoseHandDetector
 from src.core.pose_analyzer import HandPoseAnalysis, HandPoseAnalyzer
-from src.core.smoother import CommandCooldown, ExponentialMovingAverage, VotingBuffer
+from src.core.smoother import CommandCooldown, ExponentialMovingAverage, PinchVolumeLock, VotingBuffer
 from src.ui.asl_guide_dialog import ASL_GESTURE_GUIDE, ASLGuideDialog
 
 
@@ -152,6 +152,9 @@ class SignAndGestureApp(QMainWindow):
         self.voting_buffer = VotingBuffer(window_size=14, min_votes=10, min_confidence=0.60)
         self.cooldown_timer = CommandCooldown(required_hold_frames=5)
         self.pinch_ema = ExponentialMovingAverage(alpha=0.30)
+        self.pinch_lock = PinchVolumeLock()
+        # Sau khi rời Pinch, chặn các lệnh khác 1 giây (tránh cử chỉ chuyển tiếp như THUMBS_UP kích hoạt nhầm)
+        self._block_cmds_until = 0.0
 
         self.media_ctrl = WindowsMediaController()
         self.translator = SignLanguageTranslator()
@@ -464,7 +467,9 @@ class SignAndGestureApp(QMainWindow):
             "• Giơ ngón cái lên (UP)    : Tăng âm lượng (+6%)\n"
             "• Chúc ngón cái xuống      : Giảm âm lượng (-6%)\n"
             "• Chỉ trỏ sang Phải / Trái : Qua bài (Next) / Lùi bài (Prev)\n"
-            "• Giơ 2 ngón chữ V (PEACE) : Chụp ảnh màn hình (Screenshot)"
+            "• Giơ 2 ngón chữ V (PEACE) : Chụp ảnh màn hình (Screenshot)\n\n"
+            "PINCH VOLUME: kéo Cái-Trỏ để chỉnh, GIỮ YÊN ~0,7s để KHÓA.\n"
+            "Muốn chỉnh lại: hạ tay hoặc đổi tư thế rồi làm lại."
         )
         lbl_guide = QLabel(guide_text)
         lbl_guide.setStyleSheet(
@@ -573,6 +578,8 @@ class SignAndGestureApp(QMainWindow):
         # Dọn trạng thái của chế độ cũ
         self.air_mouse.release()
         self.presenter.reset()
+        self.pinch_lock.reset()
+        self.pinch_ema.reset()
         self.laser_overlay.set_point(None)
         if mode == self.MODE_PRESENTATION:
             self.laser_overlay.show()
@@ -582,6 +589,8 @@ class SignAndGestureApp(QMainWindow):
         self.current_mode = mode
         self.voting_buffer.reset()
         self.progress_hold.setValue(0)
+        if mode == self.MODE_TOUCHLESS:
+            self.progress_volume.setValue(self.media_ctrl.refresh_volume())
         for mode_id, btn in self.mode_buttons.items():
             btn.setObjectName("ModeActive" if mode_id == mode else "ModeInactive")
         self.stacked_panels.setCurrentIndex(mode)
@@ -681,22 +690,62 @@ class SignAndGestureApp(QMainWindow):
                 # Chế độ 2: Điều khiển Không chạm (Touchless Media Control)
                 gesture = primary.control_gesture
                 if gesture == "PINCH_VOLUME" and primary.pinch_ratio is not None:
+                    pre_ratio = None
+                    if not self.pinch_lock.active and not self.pinch_lock.locked:
+                        pre_ratio = self.media_ctrl.refresh_volume() / 100.0
                     smooth_ratio = self.pinch_ema.update(primary.pinch_ratio)
-                    vol_pct = self.media_ctrl.set_volume_percent(int(round(smooth_ratio * 100)))
+                    apply_val, lock_state, lock_prog = self.pinch_lock.update(
+                        smooth_ratio, pre_pinch_ratio=pre_ratio
+                    )
+                    if apply_val is not None:
+                        self.media_ctrl.set_volume_percent(int(round(apply_val * 100)))
+                    vol_pct = self.media_ctrl.current_volume_percent
                     self.progress_volume.setValue(vol_pct)
-                    self.lbl_current_symbol.setText(f"PINCH VOLUME: {vol_pct}%")
-                    self.progress_hold.setValue(100)
-                    self.lbl_last_command.setText(f"Lệnh gần nhất: Đặt âm lượng {vol_pct}% (Pinch)")
+                    self.cooldown_timer.check_trigger(None)
+                    self._block_cmds_until = time.perf_counter() + 1.0
+                    if lock_state == "LOCKED":
+                        self.lbl_current_symbol.setText(f"🔒 ĐÃ KHÓA: {vol_pct}%")
+                        self.progress_hold.setValue(100)
+                        self.lbl_last_command.setText(
+                            f"Đã chốt âm lượng {vol_pct}%. Hạ tay/đổi tư thế rồi làm lại để chỉnh tiếp."
+                        )
+                        cv2.putText(
+                            annotated,
+                            f"LOCKED: {vol_pct}%",
+                            (16, 36),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.9,
+                            (80, 255, 140),
+                            2,
+                            cv2.LINE_AA,
+                        )
+                    elif lock_state == "ARMING":
+                        self.lbl_current_symbol.setText(f"PINCH: Đang kích hoạt...")
+                        self.progress_hold.setValue(0)
+                    else:
+                        self.lbl_current_symbol.setText(f"PINCH VOLUME: {vol_pct}%")
+                        self.progress_hold.setValue(int(lock_prog * 100))
+                        self.lbl_last_command.setText(
+                            f"Đang chỉnh {vol_pct}% - giữ yên tay để khóa"
+                        )
                 else:
                     self.pinch_ema.reset()
-                    triggered, progress = self.cooldown_timer.check_trigger(gesture)
-                    self.lbl_current_symbol.setText(f"Cử chỉ: {gesture}")
-                    self.progress_hold.setValue(int(progress * 100))
-                    if triggered:
-                        action_msg = self.media_ctrl.execute_gesture_command(gesture, frame=frame)
-                        if action_msg:
-                            self.lbl_last_command.setText(f"Lệnh gần nhất: {action_msg}")
-                            self.progress_volume.setValue(self.media_ctrl.current_volume_percent)
+                    self._handle_pinch_exit()
+                    now = time.perf_counter()
+                    if now < self._block_cmds_until:
+                        # Đang trong thời gian chặn sau Pinch: không kích hoạt lệnh nào
+                        self.cooldown_timer.check_trigger(None)
+                        self.lbl_current_symbol.setText(f"Cử chỉ: {gesture} (tạm chặn)")
+                        self.progress_hold.setValue(0)
+                    else:
+                        triggered, progress = self.cooldown_timer.check_trigger(gesture)
+                        self.lbl_current_symbol.setText(f"Cử chỉ: {gesture}")
+                        self.progress_hold.setValue(int(progress * 100))
+                        if triggered:
+                            action_msg = self.media_ctrl.execute_gesture_command(gesture, frame=frame)
+                            if action_msg:
+                                self.lbl_last_command.setText(f"Lệnh gần nhất: {action_msg}")
+                                self.progress_volume.setValue(self.media_ctrl.current_volume_percent)
 
             elif self.current_mode == self.MODE_AIR_MOUSE:
                 # Chế độ 3: Điều khiển Chuột Không Chạm (Air Mouse & Pinch Click)
@@ -750,6 +799,8 @@ class SignAndGestureApp(QMainWindow):
         else:
             self.voting_buffer.update(None, 0.0)
             self.cooldown_timer.check_trigger(None)
+            self.pinch_ema.reset()
+            self._handle_pinch_exit()
             self.air_mouse.release()
             self.presenter.reset()
             self.laser_overlay.set_point(None)
@@ -772,6 +823,14 @@ class SignAndGestureApp(QMainWindow):
             Qt.TransformationMode.SmoothTransformation,
         )
         self.video_label.setPixmap(pixmap)
+
+    def _handle_pinch_exit(self) -> None:
+        """Khi rời tư thế Pinch: hoàn tác phần âm lượng bị vọt lên do động tác rút tay."""
+        rollback = self.pinch_lock.on_not_pinch()
+        if rollback is not None:
+            vol_pct = self.media_ctrl.set_volume_percent(int(round(rollback * 100)))
+            self.progress_volume.setValue(vol_pct)
+            self.lbl_last_command.setText(f"Lệnh gần nhất: Giữ âm lượng {vol_pct}% (đã bỏ qua động tác rút tay)")
 
     def _on_sentence_edited(self, text: str) -> None:
         self.translator.text_buffer = text

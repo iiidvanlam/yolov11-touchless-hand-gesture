@@ -150,8 +150,8 @@ class CommandCooldown:
     DEFAULT_COOLDOWNS: Dict[str, float] = {
         "OPEN_PALM": 1.5,     # Play / Pause Media
         "FIST": 1.5,          # Mute / Unmute
-        "THUMBS_UP": 0.28,    # Volume +6%
-        "THUMBS_DOWN": 0.28,  # Volume -6%
+        "THUMBS_UP": 0.70,    # Volume +6% (giữ tay sẽ lặp lại mỗi 0.7s)
+        "THUMBS_DOWN": 0.70,  # Volume -6%
         "POINT_RIGHT": 1.1,   # Next Track
         "POINT_LEFT": 1.1,    # Previous Track
         "PEACE": 1.8,         # Chụp màn hình
@@ -210,3 +210,125 @@ class ExponentialMovingAverage:
 
     def reset(self) -> None:
         self.value = None
+
+
+class PinchVolumeLock:
+    """
+    Máy trạng thái cho Pinch Volume, chống hiện tượng "chỉnh xong lại tự tăng":
+      - ARMED  : Đợi giữ đúng tư thế Pinch đủ `entry_frames` liên tiếp mới bắt đầu chỉnh (tránh lướt qua).
+      - ADJUST : Âm lượng bám theo khoảng cách Cái-Trỏ.
+      - LOCKED : Giữ yên tay >= `stable_seconds` -> chốt âm lượng, bỏ qua mọi chuyển động sau đó.
+      - Khi rời tư thế Pinch mà CHƯA khóa: hoàn tác về giá trị trước lúc rút tay (`rollback_s` hoặc `pre_pinch_ratio`),
+        vì lúc rút tay ngón cái/trỏ tự tách ra làm âm lượng vọt lên ngoài ý muốn.
+      - Muốn chỉnh lại sau khi khóa: rời tư thế Pinch >= `rearm_frames` khung hình rồi làm lại.
+    """
+
+    def __init__(
+        self,
+        stable_seconds: float = 0.65,
+        stable_tol: float = 0.035,
+        rollback_s: float = 0.35,
+        entry_frames: int = 3,
+        exit_frames: int = 3,
+        rearm_frames: int = 10,
+        deadband: float = 0.015,
+    ):
+        self.stable_seconds = stable_seconds
+        self.stable_tol = stable_tol
+        self.rollback_s = rollback_s
+        self.entry_frames = entry_frames
+        self.exit_frames = exit_frames
+        self.rearm_frames = rearm_frames
+        self.deadband = deadband
+        self.history: deque = deque()
+        self.locked = False
+        self.active = False
+        self.entry_count = 0
+        self.pre_pinch_ratio: Optional[float] = None
+        self.anchor: Optional[float] = None
+        self.stable_since = 0.0
+        self.last_applied: Optional[float] = None
+        self.away_frames = 0
+        self.exit_start_t: Optional[float] = None
+
+    def update(
+        self, ratio: float, pre_pinch_ratio: Optional[float] = None
+    ) -> Tuple[Optional[float], str, float]:
+        """Gọi mỗi khung hình đang ở tư thế Pinch. Trả về (giá_trị_cần_áp_dụng|None, trạng_thái, tiến_độ_khóa)."""
+        now = time.perf_counter()
+        self.away_frames = 0
+        self.exit_start_t = None
+        if self.locked:
+            return None, "LOCKED", 1.0
+
+        if not self.active:
+            if self.pre_pinch_ratio is None and pre_pinch_ratio is not None:
+                self.pre_pinch_ratio = pre_pinch_ratio
+            self.entry_count += 1
+            if self.entry_count < self.entry_frames:
+                return None, "ARMING", 0.0
+            self.active = True
+
+        self.history.append((now, ratio))
+        while self.history and now - self.history[0][0] > 1.5:
+            self.history.popleft()
+
+        if self.anchor is None or abs(ratio - self.anchor) > self.stable_tol:
+            self.anchor = ratio
+            self.stable_since = now
+        elapsed = now - self.stable_since
+        lock_progress = min(1.0, elapsed / self.stable_seconds)
+        if elapsed >= self.stable_seconds:
+            self.locked = True
+            self.last_applied = self.anchor
+            return self.anchor, "LOCKED", 1.0
+
+        if self.last_applied is None or abs(ratio - self.last_applied) >= self.deadband:
+            self.last_applied = ratio
+            return ratio, "ADJUST", lock_progress
+        return None, "ADJUST", lock_progress
+
+    def on_not_pinch(self) -> Optional[float]:
+        """Gọi mỗi khung hình KHÔNG ở tư thế Pinch (kể cả mất bàn tay). Trả về giá trị hoàn tác nếu cần."""
+        now = time.perf_counter()
+        self.away_frames += 1
+        if self.exit_start_t is None:
+            self.exit_start_t = now
+        if not self.active:
+            self.entry_count = 0
+
+        rollback: Optional[float] = None
+        # Chỉ coi là "rời tay" khi mất Pinch liên tục vài frame (tránh 1 frame nhiễu làm hoàn tác sai)
+        if self.away_frames == self.exit_frames and self.active and not self.locked:
+            target_t = self.exit_start_t - self.rollback_s
+            older = [r for (t, r) in self.history if t <= target_t]
+            if older:
+                rollback = older[-1]
+            elif self.pre_pinch_ratio is not None:
+                rollback = self.pre_pinch_ratio
+            self.active = False
+            self.entry_count = 0
+            self.pre_pinch_ratio = None
+            self.history.clear()
+            self.anchor = None
+
+        if self.away_frames >= self.rearm_frames:
+            self.locked = False
+            self.active = False
+            self.entry_count = 0
+            self.pre_pinch_ratio = None
+            self.last_applied = None
+            self.anchor = None
+            self.history.clear()
+        return rollback
+
+    def reset(self) -> None:
+        self.history.clear()
+        self.locked = False
+        self.active = False
+        self.entry_count = 0
+        self.pre_pinch_ratio = None
+        self.anchor = None
+        self.last_applied = None
+        self.away_frames = 0
+        self.exit_start_t = None

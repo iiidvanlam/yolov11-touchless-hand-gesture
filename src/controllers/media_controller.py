@@ -42,12 +42,16 @@ class WindowsMediaController:
             from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
 
             devices = AudioUtilities.GetSpeakers()
-            interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
-            self._audio_endpoint = ctypes.cast(interface, ctypes.POINTER(IAudioEndpointVolume))
+            if hasattr(devices, "EndpointVolume") and devices.EndpointVolume is not None:
+                self._audio_endpoint = devices.EndpointVolume
+            else:
+                interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
+                self._audio_endpoint = ctypes.cast(interface, ctypes.POINTER(IAudioEndpointVolume))
             scalar = float(self._audio_endpoint.GetMasterVolumeLevelScalar())
             self.current_volume_percent = int(round(scalar * 100))
             self.is_muted = bool(self._audio_endpoint.GetMute())
-        except Exception:
+        except Exception as exc:
+            print(f"[Cảnh báo] Không thể kết nối PyCAW Core Audio ({exc}), dùng fallback phím ảo.")
             self._audio_endpoint = None
 
     @staticmethod
@@ -79,9 +83,19 @@ class WindowsMediaController:
         self.current_volume_percent = target
         return self.current_volume_percent
 
+    def refresh_volume(self) -> int:
+        """Đọc lại âm lượng thực tế từ Windows (người dùng có thể đã chỉnh bằng phím/chuột)."""
+        if self._audio_endpoint is not None:
+            try:
+                self.current_volume_percent = int(round(float(self._audio_endpoint.GetMasterVolumeLevelScalar()) * 100))
+            except Exception:
+                pass
+        return self.current_volume_percent
+
     def change_volume_step(self, delta_percent: int = 6) -> str:
         """Tăng hoặc giảm âm lượng theo nấc."""
         if self._audio_endpoint is not None:
+            self.refresh_volume()
             new_vol = int(np.clip(self.current_volume_percent + delta_percent, 0, 100))
             self.set_volume_percent(new_vol)
             return f"Âm lượng: {self.current_volume_percent}%"
