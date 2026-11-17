@@ -92,6 +92,45 @@ class TestPosePipeline(unittest.TestCase):
         res = pres.update(kpts, [0, 1, 0, 0, 0], 640, 480)
         self.assertEqual(res["state"], "LASER")
         self.assertIsNotNone(res["laser"])
+
+    def test_presentation_open_palm_swipe_and_grace(self) -> None:
+        from src.controllers.presentation_controller import VK_LEFT, VK_RIGHT
+
+        pressed = []
+        pres = PresentationController(swipe_dist_ratio=0.14, cooldown_s=0.15, grace_frames=4)
+        pres._press = lambda vk: pressed.append(vk)
+
+        base = self._make_open_palm_keypoints()
+        # Vẫy tay xòe sang TRÁI (x giảm từ 300 -> 200), xen kẽ 1 frame mất dấu để kiểm tra grace_frames
+        for idx, shift_x in enumerate([80, 40, None, -30]):
+            if shift_x is None:
+                pres.on_no_hand()
+                continue
+            k = base.copy()
+            k[:, 0] += shift_x
+            res = pres.update(k, [1, 1, 1, 1, 1], 640, 480)
+        self.assertEqual(res["event"], "Slide tiếp theo ▶")
+        self.assertEqual(pressed, [VK_RIGHT])
+
+        # Trong thời gian cooldown, hồi tay sang PHẢI không được kích hoạt Slide trước
+        for shift_x in [-30, 30, 100]:
+            k = base.copy()
+            k[:, 0] += shift_x
+            r_cd = pres.update(k, [1, 1, 1, 1, 1], 640, 480)
+            self.assertIsNone(r_cd["event"])
+
+        # Hết cooldown, vẫy xòe tay sang PHẢI (x tăng từ 200 -> 350) -> Slide trước
+        import time as _t
+        _t.sleep(0.18)
+        events2 = []
+        for shift_x in [-100, -50, 0, 50]:
+            k = base.copy()
+            k[:, 0] += shift_x
+            res2 = pres.update(k, [1, 1, 1, 1, 1], 640, 480)
+            if res2["event"]:
+                events2.append(res2["event"])
+        self.assertEqual(events2, ["◀ Slide trước"])
+        self.assertEqual(pressed, [VK_RIGHT, VK_LEFT])
     def test_pinch_volume_lock_and_rollback(self) -> None:
         import time as _t
         from src.core.smoother import PinchVolumeLock

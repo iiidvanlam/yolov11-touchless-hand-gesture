@@ -155,6 +155,8 @@ class SignAndGestureApp(QMainWindow):
         self.pinch_lock = PinchVolumeLock()
         # Sau khi rời Pinch, chặn các lệnh khác 1 giây (tránh cử chỉ chuyển tiếp như THUMBS_UP kích hoạt nhầm)
         self._block_cmds_until = 0.0
+        self._slide_banner_until = 0.0
+        self._slide_banner_text = ""
 
         self.media_ctrl = WindowsMediaController()
         self.translator = SignLanguageTranslator()
@@ -774,10 +776,23 @@ class SignAndGestureApp(QMainWindow):
 
             elif self.current_mode == self.MODE_PRESENTATION:
                 # Chế độ 4: Thuyết trình Thông minh (Laser đỏ & Lật Slide vẫy tay)
-                pres = self.presenter.update(primary.keypoints, primary.fingers_up, w_f, h_f)
+                pres = self.presenter.update(
+                    primary.keypoints,
+                    primary.fingers_up,
+                    w_f,
+                    h_f,
+                    enable_swipe=self.chk_swipe.isChecked(),
+                )
                 p_state = str(pres["state"])
                 laser_pt = pres["laser"]
                 slide_ev = pres["event"]
+                swipe_prog = float(pres.get("progress", 0.0))
+
+                if slide_ev:
+                    self._slide_banner_text = str(slide_ev)
+                    self._slide_banner_until = time.perf_counter() + 1.0
+                    self.lbl_slide_event.setText(f"Lệnh slide gần nhất: {slide_ev}")
+                    self.laser_overlay.show_banner(str(slide_ev))
 
                 if self.chk_laser.isChecked() and laser_pt is not None:
                     self.laser_overlay.set_point(laser_pt)
@@ -789,27 +804,48 @@ class SignAndGestureApp(QMainWindow):
                     self.progress_hold.setValue(100)
                 else:
                     self.laser_overlay.set_point(None)
-                    self.lbl_current_symbol.setText(f"THUYẾT TRÌNH: {p_state}")
-                    self.lbl_present_state.setText(f"Trạng thái: {p_state}")
-                    self.progress_hold.setValue(60 if p_state == "SWIPE_READY" else 0)
-
-                if slide_ev and self.chk_swipe.isChecked():
-                    self.lbl_slide_event.setText(f"Lệnh slide gần nhất: {slide_ev}")
-                    self.lbl_current_symbol.setText(str(slide_ev))
+                    if time.perf_counter() < self._slide_banner_until:
+                        self.lbl_current_symbol.setText(self._slide_banner_text)
+                        self.lbl_present_state.setText(f"Đã thực thi: {self._slide_banner_text}")
+                        self.progress_hold.setValue(100)
+                        hud_txt = "NEXT SLIDE >>" if "tiếp" in self._slide_banner_text else "<< PREV SLIDE"
+                        cv2.putText(
+                            annotated,
+                            hud_txt,
+                            (16, 36),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.85,
+                            (56, 189, 248),
+                            2,
+                            cv2.LINE_AA,
+                        )
+                    elif p_state == "SWIPE_READY":
+                        self.lbl_current_symbol.setText("THUYẾT TRÌNH: SẴN SÀNG VẪY")
+                        self.lbl_present_state.setText("Trạng thái: Đang xòe tay - vẫy Trái/Phải để chuyển slide")
+                        self.progress_hold.setValue(int(swipe_prog * 100))
+                    else:
+                        self.lbl_current_symbol.setText(f"THUYẾT TRÌNH: {p_state}")
+                        self.lbl_present_state.setText(f"Trạng thái: {p_state}")
+                        self.progress_hold.setValue(0)
         else:
             self.voting_buffer.update(None, 0.0)
             self.cooldown_timer.check_trigger(None)
             self.pinch_ema.reset()
             self._handle_pinch_exit()
             self.air_mouse.release()
-            self.presenter.reset()
+            self.presenter.on_no_hand()
             self.laser_overlay.set_point(None)
             self.chart_kpt.push([None, None])
-            self.lbl_current_symbol.setText("Đang chờ bàn tay...")
-            self.progress_hold.setValue(0)
+            if self.current_mode == self.MODE_PRESENTATION and time.perf_counter() < self._slide_banner_until:
+                self.lbl_current_symbol.setText(self._slide_banner_text)
+                self.lbl_present_state.setText(f"Đã thực thi: {self._slide_banner_text}")
+                self.progress_hold.setValue(100)
+            else:
+                self.lbl_current_symbol.setText("Đang chờ bàn tay...")
+                self.progress_hold.setValue(0)
+                self.lbl_present_state.setText("Trạng thái: Đang chờ bàn tay...")
             self.progress_pinch_left.setValue(0)
             self.lbl_mouse_state.setText("Trạng thái: Đang chờ bàn tay (Con trỏ nghỉ)")
-            self.lbl_present_state.setText("Trạng thái: Đang chờ bàn tay...")
             self.lbl_fingers_debug.setText("Trạng thái 5 ngón [Cái, Trỏ, Giữa, Áp, Út]: [-, -, -, -, -]")
 
         # Chuyển frame BGR sang QPixmap hiển thị lên giao diện
