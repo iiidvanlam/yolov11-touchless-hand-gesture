@@ -1,7 +1,8 @@
 import os
+import threading
 import time
 from collections import deque
-from typing import List, Optional
+from typing import Callable, List, Optional
 import cv2
 import numpy as np
 from PyQt6.QtCore import Qt, QTimer
@@ -118,6 +119,78 @@ QCheckBox {
 """
 
 
+class _InferenceWorker(threading.Thread):
+    """Luồng chạy ngầm suy luận AI (YOLOv11-Pose + MediaPipe 3D), tách khỏi luồng giao diện Qt."""
+
+    def __init__(
+        self,
+        camera: ThreadedCamera,
+        detector: YoloPoseHandDetector,
+        get_pinch_enabled: Callable[[], bool],
+    ):
+        super().__init__(daemon=True)
+        self.camera = camera
+        self.detector = detector
+        self._get_pinch_enabled = get_pinch_enabled
+        self.running = False
+        self._lock = threading.Lock()
+        self._last_cam_id = 0
+        self._seq = 0
+        self._latest_packet = None
+
+    def run(self) -> None:
+        self.running = True
+        ai_fps = 0.0
+        last_done = time.perf_counter()
+        while self.running:
+            ok, frame, cam_fps, cam_id = self.camera.read_if_newer(self._last_cam_id)
+            if not ok or frame is None:
+                time.sleep(0.002)
+                continue
+            self._last_cam_id = cam_id
+
+            t0 = time.perf_counter()
+            annotated, analyses = self.detector.detect(
+                frame, pinch_mode_enabled=self._get_pinch_enabled()
+            )
+            now = time.perf_counter()
+            infer_ms = (now - t0) * 1000.0
+            dt = now - last_done
+            last_done = now
+            if dt > 0:
+                inst = 1.0 / dt
+                ai_fps = 0.85 * ai_fps + 0.15 * inst if ai_fps > 0 else inst
+
+            raw_kpts = (
+                self.detector.last_raw_kpts.copy()
+                if self.detector.last_raw_kpts is not None
+                else None
+            )
+            with self._lock:
+                self._seq += 1
+                self._latest_packet = (
+                    self._seq,
+                    frame,
+                    annotated,
+                    analyses,
+                    raw_kpts,
+                    cam_fps,
+                    ai_fps,
+                    infer_ms,
+                )
+
+    def pop_latest(self, last_seq: int):
+        with self._lock:
+            if self._latest_packet is None or self._latest_packet[0] == last_seq:
+                return None
+            return self._latest_packet
+
+    def stop(self) -> None:
+        self.running = False
+        if self.is_alive():
+            self.join(timeout=1.5)
+
+
 class SignAndGestureApp(QMainWindow):
     """
     Cửa sổ ứng dụng chính:
@@ -164,10 +237,12 @@ class SignAndGestureApp(QMainWindow):
         self.current_mode = self.MODE_ASL
         self.last_analyses: List[HandPoseAnalysis] = []
         self.last_action_log: str = "Sẵn sàng"
+        self._ai_worker: Optional[_InferenceWorker] = None
+        self._last_ai_seq: int = 0
 
         self._build_ui()
 
-        # Bộ định thời cập nhật khung hình (30 FPS ~ 33ms)
+        # Bộ định thời làm mới giao diện 60 Hz (không chặn bởi suy luận AI)
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._process_frame)
 
@@ -598,16 +673,37 @@ class SignAndGestureApp(QMainWindow):
         self.stacked_panels.setCurrentIndex(mode)
         self.setStyleSheet(DARK_STYLESHEET)
 
+    def _is_pinch_active(self) -> bool:
+        return (
+            self.current_mode == self.MODE_TOUCHLESS
+            and hasattr(self, "chk_pinch_volume")
+            and self.chk_pinch_volume.isChecked()
+        )
+
+    def _start_ai_worker(self) -> None:
+        if self._ai_worker is None or not self._ai_worker.is_alive():
+            self._ai_worker = _InferenceWorker(
+                self.camera, self.detector, self._is_pinch_active
+            )
+            self._ai_worker.start()
+
+    def _stop_ai_worker(self) -> None:
+        if self._ai_worker is not None:
+            self._ai_worker.stop()
+            self._ai_worker = None
+
     def toggle_camera(self, start_only: bool = False) -> None:
         if not self.camera.running:
             ok = self.camera.start()
             if ok:
-                self.timer.start(30)
+                self._start_ai_worker()
+                self.timer.start(16)
                 self.btn_cam_toggle.setText("Tạm dừng Camera")
             else:
                 self.video_label.setText("Không tìm thấy Webcam! Hãy kiểm tra kết nối Camera.")
         elif not start_only:
             self.timer.stop()
+            self._stop_ai_worker()
             self.camera.stop()
             self.btn_cam_toggle.setText("Bật lại Camera")
             self.video_label.setText("Camera đang tạm dừng.")
@@ -620,27 +716,30 @@ class SignAndGestureApp(QMainWindow):
             "YOLO Weights (*.pt *.onnx)",
         )
         if filepath:
+            was_running = self.camera.running
+            self._stop_ai_worker()
             ok = self.detector.load_model(filepath)
             self.lbl_model_status.setText(f"Model: {self.detector.model_loaded_name}")
+            if was_running:
+                self._start_ai_worker()
             if not ok:
                 QMessageBox.warning(self, "Lỗi nạp model", f"Không thể nạp file: {filepath}")
 
     def _process_frame(self) -> None:
-        ret, frame, fps = self.camera.read()
-        if not ret or frame is None:
+        if self._ai_worker is None:
+            return
+        packet = self._ai_worker.pop_latest(self._last_ai_seq)
+        if packet is None:
             return
 
-        self.lbl_fps.setText(f"FPS: {fps:.1f}")
-        pinch_enabled = (self.current_mode == self.MODE_TOUCHLESS) and self.chk_pinch_volume.isChecked()
-
-        t_start = time.perf_counter()
-        annotated, analyses = self.detector.detect(frame, pinch_mode_enabled=pinch_enabled)
-        infer_ms = (time.perf_counter() - t_start) * 1000.0
+        seq, frame, annotated, analyses, raw_kpts, cam_fps, ai_fps, infer_ms = packet
+        self._last_ai_seq = seq
+        self.lbl_fps.setText(f"Cam: {cam_fps:.1f} | AI: {ai_fps:.1f} FPS")
         self.last_analyses = analyses
 
         # Cập nhật biểu đồ hiệu năng (FPS & Latency ms)
-        self.chart_perf.push([fps, infer_ms])
-        self.chart_perf.set_footer(f"FPS: {fps:.1f}  |  Độ trễ AI: {infer_ms:.1f} ms")
+        self.chart_perf.push([cam_fps, infer_ms])
+        self.chart_perf.set_footer(f"Cam: {cam_fps:.1f} fps  |  AI: {infer_ms:.1f} ms")
 
         h_f, w_f = annotated.shape[:2]
 
@@ -660,11 +759,7 @@ class SignAndGestureApp(QMainWindow):
 
             # Cập nhật biểu đồ sóng Telemetry (Raw vs 1€ Filter trên đầu ngón trỏ Kpt 8)
             smooth_y = float(primary.keypoints[8][1])
-            raw_y = (
-                float(self.detector.last_raw_kpts[8][1])
-                if self.detector.last_raw_kpts is not None
-                else smooth_y
-            )
+            raw_y = float(raw_kpts[8][1]) if raw_kpts is not None else smooth_y
             self._raw_hist.append(raw_y)
             self._smooth_hist.append(smooth_y)
             self.chart_kpt.push([raw_y, smooth_y])
@@ -856,7 +951,7 @@ class SignAndGestureApp(QMainWindow):
             self.video_label.width(),
             self.video_label.height(),
             Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
+            Qt.TransformationMode.FastTransformation,
         )
         self.video_label.setPixmap(pixmap)
 
@@ -949,7 +1044,9 @@ class SignAndGestureApp(QMainWindow):
 
     def closeEvent(self, event) -> None:
         self.timer.stop()
+        self._stop_ai_worker()
         self.camera.stop()
+        self.detector.close()
         self.air_mouse.release()
         self.laser_overlay.close()
         event.accept()

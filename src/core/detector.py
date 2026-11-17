@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor
 import math
 import os
 from typing import List, Optional, Tuple
@@ -49,9 +50,14 @@ class YoloPoseHandDetector:
         self.analyzer = HandPoseAnalyzer()
         self.kpt_smoother = OneEuroKeypointSmoother(min_cutoff=1.4, beta=0.035)
         self.last_raw_kpts: Optional[np.ndarray] = None
+        self._prev_bbox: Optional[Tuple[int, int, int, int]] = None
+        self._pool = ThreadPoolExecutor(max_workers=2)
 
         self._init_mediapipe_refiner()
         self.load_model(model_path)
+
+    def close(self) -> None:
+        self._pool.shutdown(wait=False)
 
     def _init_mediapipe_refiner(self) -> None:
         """Khởi tạo bộ tinh chỉnh 21 khớp 3D & GestureRecognizer sub-pixel."""
@@ -157,35 +163,27 @@ class YoloPoseHandDetector:
 
         return corrected
 
-    def _refine_with_mediapipe_3d(
-        self, frame: np.ndarray, yolo_bbox: Optional[Tuple[int, int, int, int]] = None
+    def _mp_recognize_roi(
+        self, rgb_full: np.ndarray, bbox: Optional[Tuple[int, int, int, int]] = None
     ) -> Tuple[Optional[np.ndarray], Optional[Tuple[int, int, int, int]], Optional[str], float]:
-        """
-        Sử dụng MediaPipe 3D HandLandmarker & GestureRecognizer trên ROI của YOLO (hoặc toàn khung hình)
-        để trích xuất chính xác tuyệt đối 21 khớp xương bàn tay & phân loại cử chỉ sâu.
-        """
+        """Chạy MediaPipe 3D trên vùng ROI (hoặc toàn ảnh RGB) đã chuyển đổi sẵn."""
         if self.mp_recognizer is None:
             return None, None, None, 0.0
 
         import mediapipe as mp
 
-        h_full, w_full = frame.shape[:2]
-
-        # 1. Nếu YOLO đã phát hiện vùng bàn tay, thử chạy trên vùng ROI mở rộng trước để tăng tốc & độ chính xác
-        if yolo_bbox is not None:
-            x1, y1, x2, y2 = yolo_bbox
+        h_full, w_full = rgb_full.shape[:2]
+        if bbox is not None:
+            x1, y1, x2, y2 = bbox
             bw, bh = x2 - x1, y2 - y1
-            pad_x = int(max(bw, bh) * 0.45)
-            pad_y = int(max(bw, bh) * 0.45)
-            cx1 = max(0, x1 - pad_x)
-            cy1 = max(0, y1 - pad_y)
-            cx2 = min(w_full, x2 + pad_x)
-            cy2 = min(h_full, y2 + pad_y)
-
+            pad = int(max(bw, bh) * 0.50)
+            cx1 = max(0, x1 - pad)
+            cy1 = max(0, y1 - pad)
+            cx2 = min(w_full, x2 + pad)
+            cy2 = min(h_full, y2 + pad)
             if (cx2 - cx1) >= 64 and (cy2 - cy1) >= 64:
-                roi_rgb = cv2.cvtColor(frame[cy1:cy2, cx1:cx2], cv2.COLOR_BGR2RGB)
-                mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=roi_rgb)
-                res = self.mp_recognizer.recognize(mp_img)
+                roi_rgb = np.ascontiguousarray(rgb_full[cy1:cy2, cx1:cx2])
+                res = self.mp_recognizer.recognize(mp.Image(image_format=mp.ImageFormat.SRGB, data=roi_rgb))
                 if res.hand_landmarks and len(res.hand_landmarks) > 0:
                     lms = res.hand_landmarks[0]
                     rw, rh = cx2 - cx1, cy2 - cy1
@@ -205,11 +203,9 @@ class YoloPoseHandDetector:
                         min(h_full, int(np.max(kpts[:, 1]) + 18)),
                     )
                     return kpts, tight_box, neural_name, neural_score
+            return None, None, None, 0.0
 
-        # 2. Chạy trên toàn khung hình
-        rgb_full = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        mp_img_full = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_full)
-        res_full = self.mp_recognizer.recognize(mp_img_full)
+        res_full = self.mp_recognizer.recognize(mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_full))
         if res_full.hand_landmarks and len(res_full.hand_landmarks) > 0:
             lms = res_full.hand_landmarks[0]
             kpts = np.array(
@@ -228,50 +224,63 @@ class YoloPoseHandDetector:
                 min(h_full, int(np.max(kpts[:, 1]) + 18)),
             )
             return kpts, tight_box, neural_name, neural_score
-
         return None, None, None, 0.0
+
+    def _run_yolo(
+        self, frame: np.ndarray
+    ) -> Tuple[Optional[Tuple[int, int, int, int]], Optional[np.ndarray], float]:
+        if self.model is None:
+            return None, None, 0.0
+        try:
+            results = self.model.predict(
+                source=frame,
+                conf=self.conf_threshold,
+                iou=self.iou_threshold,
+                device=self.device,
+                verbose=False,
+                imgsz=384,
+            )
+            if results and results[0].boxes is not None and len(results[0].boxes) > 0:
+                res = results[0]
+                boxes_xyxy = res.boxes.xyxy.cpu().numpy()
+                boxes_conf = res.boxes.conf.cpu().numpy()
+                best_idx = int(np.argmax(boxes_conf))
+                x1, y1, x2, y2 = [int(v) for v in boxes_xyxy[best_idx]]
+                yolo_bbox = (x1, y1, x2, y2)
+                yolo_conf = float(boxes_conf[best_idx])
+                yolo_kpts = None
+                if res.keypoints is not None and res.keypoints.data is not None:
+                    kpts_all = res.keypoints.data.cpu().numpy()
+                    if best_idx < len(kpts_all) and kpts_all[best_idx].shape[0] >= 21:
+                        yolo_kpts = self._anatomical_correct_keypoints(kpts_all[best_idx][:21])
+                return yolo_bbox, yolo_kpts, yolo_conf
+        except Exception:
+            pass
+        return None, None, 0.0
 
     def detect(
         self, frame: np.ndarray, pinch_mode_enabled: bool = False
     ) -> Tuple[np.ndarray, List[HandPoseAnalysis]]:
-        """Chạy suy luận Hybrid YOLOv11-Pose (GPU) + MediaPipe 3D + 1€ Filter và vẽ 21 khớp xương."""
+        """Chạy song song Hybrid YOLOv11-Pose (GPU) + MediaPipe 3D (CPU) + 1€ Filter để đạt FPS tối đa."""
         annotated = frame.copy()
         analyses: List[HandPoseAnalysis] = []
 
-        yolo_bbox: Optional[Tuple[int, int, int, int]] = None
-        yolo_kpts: Optional[np.ndarray] = None
-        yolo_conf: float = 0.0
+        rgb_full = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        prev_box = self._prev_bbox
 
-        # Stage 1: YOLOv11-Pose trên GPU (CUDA:0)
-        if self.model is not None:
-            try:
-                results = self.model.predict(
-                    source=frame,
-                    conf=self.conf_threshold,
-                    iou=self.iou_threshold,
-                    device=self.device,
-                    verbose=False,
-                    imgsz=512,
-                )
-                if results and results[0].boxes is not None and len(results[0].boxes) > 0:
-                    res = results[0]
-                    boxes_xyxy = res.boxes.xyxy.cpu().numpy()
-                    boxes_conf = res.boxes.conf.cpu().numpy()
-                    best_idx = int(np.argmax(boxes_conf))
-                    x1, y1, x2, y2 = [int(v) for v in boxes_xyxy[best_idx]]
-                    yolo_bbox = (x1, y1, x2, y2)
-                    yolo_conf = float(boxes_conf[best_idx])
-                    if res.keypoints is not None and res.keypoints.data is not None:
-                        kpts_all = res.keypoints.data.cpu().numpy()
-                        if best_idx < len(kpts_all) and kpts_all[best_idx].shape[0] >= 21:
-                            yolo_kpts = self._anatomical_correct_keypoints(kpts_all[best_idx][:21])
-            except Exception:
-                pass
+        # Chạy song song Stage 1 (YOLO trên GPU) và Stage 2 (MediaPipe trên CPU) cùng lúc (~10ms tổng)
+        f_yolo = self._pool.submit(self._run_yolo, frame)
+        f_mp = self._pool.submit(self._mp_recognize_roi, rgb_full, prev_box)
 
-        # Stage 2: Tinh chỉnh 21 khớp 3D sub-pixel & nhận diện cử chỉ sâu
-        mp_kpts, mp_bbox, neural_gesture, neural_score = self._refine_with_mediapipe_3d(
-            frame, yolo_bbox=yolo_bbox
-        )
+        yolo_bbox, yolo_kpts, yolo_conf = f_yolo.result()
+        mp_kpts, mp_bbox, neural_gesture, neural_score = f_mp.result()
+
+        # Nếu prev_box bị trượt (tay mới vào hoặc di chuyển nhanh) thì thử lại đúng vùng YOLO/toàn ảnh
+        if mp_kpts is None and self.mp_recognizer is not None:
+            if yolo_bbox is not None:
+                mp_kpts, mp_bbox, neural_gesture, neural_score = self._mp_recognize_roi(rgb_full, yolo_bbox)
+            elif prev_box is not None:
+                mp_kpts, mp_bbox, neural_gesture, neural_score = self._mp_recognize_roi(rgb_full, None)
 
         final_kpts: Optional[np.ndarray] = None
         final_bbox: Optional[Tuple[int, int, int, int]] = None
@@ -289,15 +298,19 @@ class YoloPoseHandDetector:
             final_bbox = yolo_bbox
 
         if final_kpts is None or final_bbox is None:
+            self._prev_bbox = None
             self.kpt_smoother.reset()
             self.last_raw_kpts = None
             return annotated, analyses
 
         # Kiểm tra giải phẫu bàn tay chặt chẽ trước khi lọc & phân tích
         if not self.analyzer.is_valid_hand_skeleton(final_bbox, final_kpts):
+            self._prev_bbox = None
             self.kpt_smoother.reset()
             self.last_raw_kpts = None
             return annotated, analyses
+
+        self._prev_bbox = final_bbox
 
         # Lưu tọa độ thô (trước lọc) để vẽ biểu đồ Telemetry so sánh Raw vs 1€
         self.last_raw_kpts = final_kpts.copy()
