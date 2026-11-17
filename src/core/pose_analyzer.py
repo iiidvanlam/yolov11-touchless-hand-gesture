@@ -98,24 +98,32 @@ class HandPoseAnalyzer:
         """
         Kiểm tra xem 21 điểm khớp xương có tạo thành cấu trúc bàn tay hợp lệ hay đang bị nhiễu/chưa hội tụ.
         """
+        if kpts is None or kpts.shape[0] < 21:
+            return False
+
+        if kpts.shape[1] >= 3 and float(np.mean(kpts[:21, 2])) < 0.50:
+            return False
+
         x1, y1, x2, y2 = bbox
         box_diag = math.hypot(max(1, x2 - x1), max(1, y2 - y1))
 
-        xs = kpts[:, 0]
-        ys = kpts[:, 1]
+        xs = kpts[:21, 0]
+        ys = kpts[:21, 1]
         kpt_span = math.hypot(float(np.max(xs) - np.min(xs)), float(np.max(ys) - np.min(ys)))
-        if kpt_span < 0.18 * box_diag:
+        if kpt_span < 36.0 or kpt_span < 0.18 * box_diag:
             return False
 
         palm_len = self._dist(kpts[0], kpts[9])
-        if palm_len < 0.10 * box_diag:
+        if palm_len < 18.0 or palm_len < 0.10 * box_diag:
             return False
 
         d_5_9 = self._dist(kpts[5], kpts[9])
         d_9_13 = self._dist(kpts[9], kpts[13])
         d_13_17 = self._dist(kpts[13], kpts[17])
         d_5_17 = self._dist(kpts[5], kpts[17])
-        if d_5_17 < 1e-3 or (d_5_9 + d_9_13 + d_13_17) / d_5_17 > 2.6:
+        if d_5_17 < 0.15 * palm_len or d_5_17 > 2.2 * palm_len:
+            return False
+        if (d_5_9 + d_9_13 + d_13_17) / d_5_17 > 2.4:
             return False
 
         return True

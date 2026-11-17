@@ -80,8 +80,10 @@ class TestPosePipeline(unittest.TestCase):
         mouse = AirMouseController()
         mouse._move = lambda x, y: None  # tránh di chuyển chuột thật khi chạy unit test
         mouse._mouse = lambda flag: None
-        info = mouse.update(kpts, 640, 480)
-        self.assertEqual(info["state"], "MOVE")
+        info1 = mouse.update(kpts, 640, 480, fingers=[1, 1, 1, 1, 1])
+        self.assertEqual(info1["state"], "READY")
+        info2 = mouse.update(kpts, 640, 480, fingers=[1, 1, 1, 1, 1])
+        self.assertEqual(info2["state"], "MOVE")
 
     def test_presentation_laser_mode(self) -> None:
         kpts = self._make_open_palm_keypoints()

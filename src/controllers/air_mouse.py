@@ -60,6 +60,7 @@ class AirMouseController:
         self.left_down_t = 0.0
         self.right_armed = True
         self.last_right_t = 0.0
+        self.valid_streak = 0
 
     @staticmethod
     def _screen_size() -> Tuple[int, int]:
@@ -89,14 +90,22 @@ class AirMouseController:
             self.left_down = False
         self.cur_x = self.cur_y = None
         self.right_armed = True
+        self.valid_streak = 0
 
-    def update(self, kpts: np.ndarray, frame_w: int, frame_h: int) -> Dict[str, object]:
+    def update(
+        self,
+        kpts: np.ndarray,
+        frame_w: int,
+        frame_h: int,
+        fingers: Optional[list] = None,
+    ) -> Dict[str, object]:
         now = time.perf_counter()
         palm = palm_size(kpts)
         r_left = _dist(kpts[4], kpts[8]) / palm
         r_right = _dist(kpts[4], kpts[12]) / palm
-        # "Ly hợp": đầu ngón trỏ cuộn vào gần cổ tay hơn khớp gốc ngón trỏ => nắm tay
-        clutch = _dist(kpts[8], kpts[0]) < 1.15 * _dist(kpts[5], kpts[0])
+        # "Ly hợp": ngón trỏ gập vào lòng bàn tay (và không đang chụm kéo chuột) => tạm dừng con trỏ
+        index_folded = (fingers is not None and len(fingers) >= 2 and fingers[1] == 0 and r_left > self.PINCH_OFF)
+        clutch = index_folded or (_dist(kpts[8], kpts[0]) < 1.18 * _dist(kpts[5], kpts[0]))
 
         event = ""
         nx, ny = map_to_region(kpts[8][0], kpts[8][1], frame_w, frame_h, self.region)
@@ -106,8 +115,14 @@ class AirMouseController:
             if self.left_down:
                 self._mouse(MOUSEEVENTF_LEFTUP)
                 self.left_down = False
-            self.cur_x = self.cur_y = None  # Khi mở tay lại, con trỏ bắt đầu từ vị trí mới mà không giật
-            return {"state": "CLUTCH", "event": "Tạm dừng con trỏ (nắm tay)", "nx": nx, "ny": ny,
+            self.cur_x = self.cur_y = None
+            return {"state": "CLUTCH", "event": "Tạm dừng con trỏ (gập ngón trỏ / nắm tay)", "nx": nx, "ny": ny,
+                    "r_left": r_left, "r_right": r_right, "dragging": False}
+
+        # Đòi hỏi tối thiểu 2 frame bàn tay hợp lệ liên tiếp trước khi cho phép di chuyển chuột thật
+        self.valid_streak += 1
+        if self.valid_streak < 2:
+            return {"state": "READY", "event": "Đang xác nhận bàn tay...", "nx": nx, "ny": ny,
                     "r_left": r_left, "r_right": r_right, "dragging": False}
 
         # --- Máy trạng thái chuột trái (click + drag) ---

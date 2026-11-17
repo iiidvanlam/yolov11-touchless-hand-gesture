@@ -701,7 +701,7 @@ class SignAndGestureApp(QMainWindow):
             elif self.current_mode == self.MODE_AIR_MOUSE:
                 # Chế độ 3: Điều khiển Chuột Không Chạm (Air Mouse & Pinch Click)
                 if self.chk_air_mouse.isChecked():
-                    info = self.air_mouse.update(primary.keypoints, w_f, h_f)
+                    info = self.air_mouse.update(primary.keypoints, w_f, h_f, fingers=primary.fingers_up)
                     state = str(info["state"])
                     ev = str(info["event"])
                     r_left = float(info["r_left"])
@@ -756,6 +756,9 @@ class SignAndGestureApp(QMainWindow):
             self.chart_kpt.push([None, None])
             self.lbl_current_symbol.setText("Đang chờ bàn tay...")
             self.progress_hold.setValue(0)
+            self.progress_pinch_left.setValue(0)
+            self.lbl_mouse_state.setText("Trạng thái: Đang chờ bàn tay (Con trỏ nghỉ)")
+            self.lbl_present_state.setText("Trạng thái: Đang chờ bàn tay...")
             self.lbl_fingers_debug.setText("Trạng thái 5 ngón [Cái, Trỏ, Giữa, Áp, Út]: [-, -, -, -, -]")
 
         # Chuyển frame BGR sang QPixmap hiển thị lên giao diện

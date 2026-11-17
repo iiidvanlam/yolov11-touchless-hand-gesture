@@ -31,7 +31,7 @@ class YoloPoseHandDetector:
     def __init__(
         self,
         model_path: str = "models/yolo11n_hand_pose_best.pt",
-        conf_threshold: float = 0.32,
+        conf_threshold: float = 0.55,
         iou_threshold: float = 0.45,
         use_gpu: bool = True,
         gesture_task_path: str = "models/gesture_recognizer.task",
@@ -65,9 +65,9 @@ class YoloPoseHandDetector:
             opts = mp_vision.GestureRecognizerOptions(
                 base_options=base_opts,
                 num_hands=1,
-                min_hand_detection_confidence=0.25,
-                min_hand_presence_confidence=0.25,
-                min_tracking_confidence=0.25,
+                min_hand_detection_confidence=0.62,
+                min_hand_presence_confidence=0.62,
+                min_tracking_confidence=0.58,
             )
             self.mp_recognizer = mp_vision.GestureRecognizer.create_from_options(opts)
         except Exception as exc:
@@ -277,15 +277,24 @@ class YoloPoseHandDetector:
         final_bbox: Optional[Tuple[int, int, int, int]] = None
         final_conf: float = yolo_conf
 
-        if mp_kpts is not None and mp_bbox is not None:
-            final_kpts = mp_kpts
-            final_bbox = yolo_bbox if yolo_bbox is not None else mp_bbox
-            final_conf = max(yolo_conf, 0.92)
-        elif yolo_kpts is not None and yolo_bbox is not None:
+        if self.mp_recognizer is not None:
+            # Khi có MediaPipe 3D Refiner, BẮT BUỘC phải được MediaPipe xác nhận là bàn tay thật
+            # để loại bỏ 100% hiện tượng YOLO nhận nhầm khuôn mặt / quần áo / phông nền làm bàn tay.
+            if mp_kpts is not None and mp_bbox is not None:
+                final_kpts = mp_kpts
+                final_bbox = mp_bbox
+                final_conf = max(yolo_conf, 0.92)
+        elif yolo_kpts is not None and yolo_bbox is not None and yolo_conf >= 0.65:
             final_kpts = yolo_kpts
             final_bbox = yolo_bbox
 
         if final_kpts is None or final_bbox is None:
+            self.kpt_smoother.reset()
+            self.last_raw_kpts = None
+            return annotated, analyses
+
+        # Kiểm tra giải phẫu bàn tay chặt chẽ trước khi lọc & phân tích
+        if not self.analyzer.is_valid_hand_skeleton(final_bbox, final_kpts):
             self.kpt_smoother.reset()
             self.last_raw_kpts = None
             return annotated, analyses
