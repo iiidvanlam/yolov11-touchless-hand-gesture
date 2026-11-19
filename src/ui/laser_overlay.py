@@ -11,6 +11,8 @@ from PyQt6.QtCore import QPointF, QRectF, QTimer, Qt
 from PyQt6.QtGui import QColor, QFont, QGuiApplication, QPainter, QPen, QRadialGradient
 from PyQt6.QtWidgets import QWidget
 
+from src.ui.theme import T
+
 
 class LaserOverlay(QWidget):
     def __init__(self):
@@ -87,15 +89,19 @@ class LaserOverlay(QWidget):
             p.drawEllipse(self.point, 26, 26)
 
         if show_banner:
-            bw, bh = 360, 56
+            bw, bh = 360, 54
             bx = (self.width() - bw) / 2.0
             by = 36.0
             rect = QRectF(bx, by, bw, bh)
-            p.setPen(QPen(QColor(56, 189, 248, 230), 2))
-            p.setBrush(QColor(15, 23, 42, 215))
-            p.drawRoundedRect(rect, 12, 12)
-            p.setFont(QFont("Segoe UI", 15, QFont.Weight.Bold))
-            p.setPen(QColor(248, 250, 252))
+            bg = QColor(T.SURFACE)
+            bg.setAlpha(232)
+            border = QColor(T.ACCENT)
+            border.setAlpha(220)
+            p.setPen(QPen(border, 1.5))
+            p.setBrush(bg)
+            p.drawRoundedRect(rect, float(T.RADIUS_CARD), float(T.RADIUS_CARD))
+            p.setFont(QFont("Segoe UI Variable Text", 14, QFont.Weight.Bold))
+            p.setPen(QColor(T.TEXT))
             p.drawText(rect, Qt.AlignmentFlag.AlignCenter, self.banner_text)
 
         p.end()

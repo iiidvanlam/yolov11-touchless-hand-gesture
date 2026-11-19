@@ -1,3 +1,4 @@
+import importlib.util
 import os
 import threading
 import time
@@ -6,8 +7,9 @@ from typing import Callable, List, Optional
 import cv2
 import numpy as np
 from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QFont, QImage, QPixmap
+from PyQt6.QtGui import QColor, QImage, QKeySequence, QPalette, QPixmap, QShortcut
 from PyQt6.QtWidgets import (
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QFileDialog,
@@ -21,6 +23,8 @@ from PyQt6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
+    QSplitter,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -30,93 +34,16 @@ from src.controllers.air_mouse import DEFAULT_ACTIVE_REGION, AirMouseController
 from src.controllers.media_controller import WindowsMediaController
 from src.controllers.presentation_controller import PresentationController
 from src.controllers.sign_translator import SignLanguageTranslator
+from src.ui import theme
+from src.ui.theme import T
 from src.ui.laser_overlay import LaserOverlay
 from src.ui.telemetry_widget import TelemetryChart
 from src.core.camera import ThreadedCamera
 from src.core.detector import YoloPoseHandDetector
+from src.core.paths import PROJECT_ROOT, resolve_project_path
 from src.core.pose_analyzer import HandPoseAnalysis, HandPoseAnalyzer
 from src.core.smoother import CommandCooldown, ExponentialMovingAverage, PinchVolumeLock, VotingBuffer
 from src.ui.asl_guide_dialog import ASL_GESTURE_GUIDE, ASLGuideDialog
-
-
-DARK_STYLESHEET = """
-QMainWindow {
-    background-color: #0f172a;
-    color: #f8fafc;
-}
-QLabel {
-    color: #e2e8f0;
-    font-family: 'Segoe UI', sans-serif;
-}
-QFrame#Card {
-    background-color: #1e293b;
-    border: 1px solid #334155;
-    border-radius: 10px;
-}
-QPushButton {
-    background-color: #2563eb;
-    color: #ffffff;
-    border: none;
-    border-radius: 6px;
-    padding: 8px 14px;
-    font-weight: 600;
-    font-size: 13px;
-}
-QPushButton:hover {
-    background-color: #3b82f6;
-}
-QPushButton:pressed {
-    background-color: #1d4ed8;
-}
-QPushButton#ModeActive {
-    background-color: #10b981;
-    color: #052e16;
-    font-weight: 700;
-}
-QPushButton#ModeInactive {
-    background-color: #334155;
-    color: #cbd5e1;
-}
-QPushButton#DangerBtn {
-    background-color: #dc2626;
-}
-QPushButton#DangerBtn:hover {
-    background-color: #ef4444;
-}
-QLineEdit {
-    background-color: #0f172a;
-    color: #38bdf8;
-    border: 1px solid #475569;
-    border-radius: 6px;
-    padding: 8px;
-    font-size: 18px;
-    font-weight: bold;
-}
-QProgressBar {
-    background-color: #0f172a;
-    border: 1px solid #334155;
-    border-radius: 5px;
-    text-align: center;
-    color: #f8fafc;
-    font-weight: bold;
-}
-QProgressBar::chunk {
-    background-color: #10b981;
-    border-radius: 4px;
-}
-QComboBox {
-    background-color: #0f172a;
-    color: #f8fafc;
-    border: 1px solid #475569;
-    border-radius: 5px;
-    padding: 5px 10px;
-}
-QCheckBox {
-    color: #e2e8f0;
-    font-size: 13px;
-    spacing: 8px;
-}
-"""
 
 
 class _InferenceWorker(threading.Thread):
@@ -207,7 +134,8 @@ class SignAndGestureApp(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("YOLOv11-Pose: Nhận diện Ngôn ngữ Ký hiệu (A-Z) & Điều khiển Không chạm")
-        self.resize(1280, 880)
+        self.setMinimumSize(1100, 700)
+        self.resize(1360, 860)
 
         # Module chế độ mới: Chuột không chạm & Thuyết trình
         self.air_mouse = AirMouseController()
@@ -217,7 +145,7 @@ class SignAndGestureApp(QMainWindow):
         # Bộ đệm số liệu đo jitter thực tế (Keypoint 8, trục Y)
         self._raw_hist: deque = deque(maxlen=45)
         self._smooth_hist: deque = deque(maxlen=45)
-        self.setStyleSheet(DARK_STYLESHEET)
+        self.setStyleSheet(theme.build_stylesheet())
 
         # Khởi tạo các module cốt lõi
         self.camera = ThreadedCamera(camera_index=0, width=640, height=480, flip_horizontal=True)
@@ -249,372 +177,454 @@ class SignAndGestureApp(QMainWindow):
         # Tự động bật camera khi khởi động
         self.toggle_camera(start_only=True)
 
+    # ------------------------------------------------------------------
+    # Xây dựng giao diện (theo design system trong src/ui/theme.py)
+    # ------------------------------------------------------------------
     def _build_ui(self) -> None:
         central = QWidget()
+        central.setObjectName("Root")
+        central.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
         self.setCentralWidget(central)
-        root_layout = QHBoxLayout(central)
-        root_layout.setContentsMargins(14, 14, 14, 14)
-        root_layout.setSpacing(14)
+        root = QVBoxLayout(central)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
 
-        # ================= CỘT TRÁI: KHUNG CAMERA & TRẠNG THÁI MODEL =================
-        left_col = QVBoxLayout()
-        left_col.setSpacing(10)
+        root.addWidget(self._build_header())
 
-        cam_card = QFrame()
-        cam_card.setObjectName("Card")
-        cam_layout = QVBoxLayout(cam_card)
+        body = QSplitter(Qt.Orientation.Horizontal)
+        body.setChildrenCollapsible(False)
+        body.setHandleWidth(T.SP_3)
+        body.addWidget(self._build_camera_column())
+        body.addWidget(self._build_control_column())
+        body.setStretchFactor(0, 6)
+        body.setStretchFactor(1, 5)
+        body.setSizes([780, 620])
 
-        # Thanh tiêu đề Camera + FPS + Model status
-        top_bar = QHBoxLayout()
-        self.lbl_model_status = QLabel(f"Model: {self.detector.model_loaded_name}")
-        self.lbl_model_status.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
-        self.lbl_fps = QLabel("FPS: 0.0")
-        self.lbl_fps.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
-        self.lbl_fps.setStyleSheet("color: #38bdf8;")
-        top_bar.addWidget(self.lbl_model_status)
-        top_bar.addStretch()
-        top_bar.addWidget(self.lbl_fps)
-        cam_layout.addLayout(top_bar)
+        wrap = QWidget()
+        wrap_layout = QVBoxLayout(wrap)
+        wrap_layout.setContentsMargins(T.SP_4, T.SP_4, T.SP_4, T.SP_4)
+        wrap_layout.addWidget(body)
+        root.addWidget(wrap, stretch=1)
 
-        # Khung hiển thị Video
-        self.video_label = QLabel("Đang kết nối Webcam...")
+        self._install_shortcuts()
+        central.setFocus()
+
+    def _build_header(self) -> QWidget:
+        header = QFrame()
+        header.setObjectName("Header")
+        lay = QHBoxLayout(header)
+        lay.setContentsMargins(T.SP_4, 10, T.SP_4, 10)
+        lay.setSpacing(T.SP_2)
+
+        brand = QVBoxLayout()
+        brand.setSpacing(0)
+        brand.addWidget(theme.label("Nhận diện cử chỉ tay", role="title"))
+        brand.addWidget(theme.label("YOLOv11-Pose · 21 khớp xương thời gian thực", role="subtitle"))
+        lay.addLayout(brand)
+        lay.addStretch()
+
+        self.lbl_cam_status = theme.pill("■ Camera: kết nối…", "warn")
+        self.lbl_cam_status.setAccessibleName("Trạng thái camera")
+
+        model_tone = "neutral" if self.detector.model is not None else "warn"
+        self.lbl_model_status = theme.pill(f"Model: {self.detector.model_loaded_name}", model_tone)
+        self.lbl_model_status.setAccessibleName("Mô hình đang dùng")
+        self.lbl_model_status.setToolTip("Trọng số YOLOv11-Pose và thiết bị đang dùng")
+
+        self.lbl_fps = theme.pill("Cam 0.0 · AI 0.0 FPS", "info")
+        self.lbl_fps.setAccessibleName("Tốc độ khung hình")
+        self.lbl_fps.setToolTip("Cam: tốc độ camera · AI: tốc độ suy luận")
+
+        lay.addWidget(self.lbl_cam_status)
+        lay.addWidget(self.lbl_model_status)
+        lay.addWidget(self.lbl_fps)
+        return header
+
+    def _build_camera_column(self) -> QWidget:
+        cam_card, cam_layout = theme.card(spacing=T.SP_3)
+
+        cam_layout.addWidget(theme.caption("Camera & HUD khung xương 21 điểm"))
+
+        self.video_label = theme.label(
+            "Đang kết nối webcam…\nHãy đảm bảo camera không bị ứng dụng khác chiếm dụng.",
+            role="viewport",
+        )
         self.video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.video_label.setMinimumSize(640, 400)
-        self.video_label.setStyleSheet("background-color: #020617; border-radius: 8px; color: #64748b; font-size: 16px;")
+        self.video_label.setMinimumSize(480, 300)
+        self.video_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
+        self.video_label.setAccessibleName("Khung hình camera trực tiếp")
         cam_layout.addWidget(self.video_label, stretch=1)
 
         # Biểu đồ Telemetry thời gian thực
         self.chart_kpt = TelemetryChart(
-            "ĐẦU NGÓN TRỎ (Kpt 8) - TRỤC Y (px)",
-            [("Raw", "#94a3b8"), ("1€ Filter", "#ef4444")],
+            "Ngón trỏ (Kpt 8 · Y)",
+            [("Raw", T.MUTED), ("1€ Filter", T.ACCENT)],
             unit="",
         )
+        self.chart_kpt.setAccessibleName("Biểu đồ so sánh tọa độ thô và sau bộ lọc One-Euro")
         self.chart_perf = TelemetryChart(
-            "HIỆU NĂNG",
-            [("FPS", "#38bdf8"), ("Suy luận ms", "#f59e0b")],
+            "Hiệu năng",
+            [("FPS", T.ACCENT), ("AI (ms)", T.WARNING)],
             unit="",
         )
+        self.chart_perf.setAccessibleName("Biểu đồ FPS và độ trễ suy luận")
         charts_row = QHBoxLayout()
+        charts_row.setSpacing(T.SP_3)
         charts_row.addWidget(self.chart_kpt, stretch=3)
         charts_row.addWidget(self.chart_perf, stretch=2)
         cam_layout.addLayout(charts_row)
 
-        # Thanh nút điều khiển Camera & Nạp Model
-        cam_btn_bar = QHBoxLayout()
-        self.btn_cam_toggle = QPushButton("Tạm dừng Camera")
-        self.btn_cam_toggle.clicked.connect(lambda: self.toggle_camera(start_only=False))
+        # Điều khiển camera & nạp model
+        btn_bar = QHBoxLayout()
+        btn_bar.setSpacing(T.SP_2)
+        self.btn_cam_toggle = theme.button(
+            "Tạm dừng Camera",
+            tooltip="Bật/tắt camera (Ctrl+Space)",
+            on_click=lambda: self.toggle_camera(start_only=False),
+        )
+        btn_load_model = theme.button(
+            "Nạp trọng số YOLO (.pt / .onnx)",
+            variant="ghost",
+            tooltip="Chọn tệp trọng số YOLOv11-Pose khác",
+            on_click=self._browse_model_file,
+        )
+        btn_bar.addWidget(self.btn_cam_toggle)
+        btn_bar.addWidget(btn_load_model)
+        cam_layout.addLayout(btn_bar)
+        return cam_card
 
-        btn_load_model = QPushButton("Nạp trọng số YOLO (.pt / .onnx)")
-        btn_load_model.clicked.connect(self._browse_model_file)
+    def _build_control_column(self) -> QWidget:
+        panel = QWidget()
+        col = QVBoxLayout(panel)
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(T.SP_3)
 
-        cam_btn_bar.addWidget(self.btn_cam_toggle)
-        cam_btn_bar.addWidget(btn_load_model)
-        cam_layout.addLayout(cam_btn_bar)
+        col.addWidget(self._build_mode_card())
+        col.addWidget(self._build_status_card())
 
-        left_col.addWidget(cam_card, stretch=1)
-        root_layout.addLayout(left_col, stretch=6)
+        self.stacked_panels = QStackedWidget()
+        # Mode 1 (ASL) đã có vùng cuộn riêng cho danh sách Tra nhanh nên đặt trực tiếp để
+        # Bảng hiển thị chữ & nút thao tác luôn cố định, không bao giờ bị cuộn khuất.
+        self.stacked_panels.addWidget(self._create_asl_panel())
+        for page in (
+            self._create_touchless_panel(),
+            self._create_air_mouse_panel(),
+            self._create_presentation_panel(),
+        ):
+            self.stacked_panels.addWidget(self._wrap_scroll(page))
+        col.addWidget(self.stacked_panels, stretch=1)
+        return panel
 
-        # ================= CỘT PHẢI: CHUYỂN CHẾ ĐỘ & BẢNG ĐIỀU KHIỂN =================
-        right_col = QVBoxLayout()
-        right_col.setSpacing(12)
+    @staticmethod
+    def _wrap_scroll(widget: QWidget) -> QScrollArea:
+        """Bọc bảng chế độ trong QScrollArea trong suốt để chỉ cuộn khi cửa sổ nhỏ, giữ cố định bộ chọn chế độ."""
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setWidget(widget)
+        return scroll
 
-        # 1. Thẻ chuyển đổi 2 chế độ
-        mode_card = QFrame()
-        mode_card.setObjectName("Card")
-        mode_layout = QVBoxLayout(mode_card)
-        lbl_mode_title = QLabel("CHẾ ĐỘ HOẠT ĐỘNG")
-        lbl_mode_title.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
-        lbl_mode_title.setStyleSheet("color: #94a3b8;")
-        mode_layout.addWidget(lbl_mode_title)
+    def _build_mode_card(self) -> QWidget:
+        mode_card, mode_layout = theme.card(spacing=T.SP_2)
+        mode_layout.addWidget(theme.caption("Chế độ hoạt động"))
 
-        mode_btns = QGridLayout()
+        grid = QGridLayout()
+        grid.setSpacing(T.SP_2)
         mode_defs = [
-            (self.MODE_ASL, "1. Ngôn ngữ Ký hiệu (A-Z)"),
-            (self.MODE_TOUCHLESS, "2. Điều khiển Media"),
-            (self.MODE_AIR_MOUSE, "3. Chuột không chạm"),
-            (self.MODE_PRESENTATION, "4. Thuyết trình (Laser)"),
+            (self.MODE_ASL, "1 · Ngôn ngữ ký hiệu", "Nhận diện bảng chữ cái ASL A–Z, ghép câu và đọc thành tiếng"),
+            (self.MODE_TOUCHLESS, "2 · Điều khiển media", "Âm lượng, phát/dừng, chuyển bài, chụp màn hình bằng cử chỉ"),
+            (self.MODE_AIR_MOUSE, "3 · Chuột không chạm", "Điều khiển con trỏ chuột bằng đầu ngón trỏ"),
+            (self.MODE_PRESENTATION, "4 · Thuyết trình", "Tia laser ảo và lật slide bằng cách vẫy tay"),
         ]
+        self.mode_group = QButtonGroup(self)
+        self.mode_group.setExclusive(True)
         self.mode_buttons = {}
-        for idx, (mode_id, text) in enumerate(mode_defs):
-            btn = QPushButton(text)
-            btn.setObjectName("ModeActive" if mode_id == self.MODE_ASL else "ModeInactive")
-            btn.clicked.connect(lambda _=False, m=mode_id: self._switch_mode(m))
-            mode_btns.addWidget(btn, idx // 2, idx % 2)
+        for idx, (mode_id, text, hint) in enumerate(mode_defs):
+            btn = theme.button(
+                text,
+                role="tab",
+                checkable=True,
+                tooltip=f"{hint}  (Ctrl+{idx + 1})",
+                on_click=lambda m=mode_id: self._switch_mode(m),
+            )
+            btn.setChecked(mode_id == self.MODE_ASL)
+            btn.setAccessibleName(f"Chế độ {text}")
+            self.mode_group.addButton(btn)
+            grid.addWidget(btn, idx // 2, idx % 2)
             self.mode_buttons[mode_id] = btn
-        mode_layout.addLayout(mode_btns)
-        right_col.addWidget(mode_card)
+        mode_layout.addLayout(grid)
+        return mode_card
 
-        # 2. Thẻ hiển thị Cử chỉ hiện tại & Thanh tiến trình xác nhận
-        detect_card = QFrame()
-        detect_card.setObjectName("Card")
-        detect_layout = QVBoxLayout(detect_card)
+    def _build_status_card(self) -> QWidget:
+        detect_card, detect_layout = theme.card(spacing=T.SP_2)
+        detect_layout.addWidget(theme.caption("Trạng thái nhận diện"))
 
-        self.lbl_current_symbol = QLabel("Đang chờ bàn tay...")
-        self.lbl_current_symbol.setFont(QFont("Segoe UI", 22, QFont.Weight.Bold))
+        self.lbl_current_symbol = theme.label("Đang chờ bàn tay…", role="hero", tone="idle", wrap=True)
         self.lbl_current_symbol.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.lbl_current_symbol.setStyleSheet("color: #10b981; padding: 6px;")
+        self.lbl_current_symbol.setMinimumHeight(44)
+        self.lbl_current_symbol.setAccessibleName("Cử chỉ đang nhận diện")
         detect_layout.addWidget(self.lbl_current_symbol)
+        self._hero_tone = "idle"
 
         self.progress_hold = QProgressBar()
         self.progress_hold.setRange(0, 100)
         self.progress_hold.setValue(0)
         self.progress_hold.setFormat("Độ ổn định cử chỉ: %p%")
+        self.progress_hold.setAccessibleName("Độ ổn định cử chỉ")
         detect_layout.addWidget(self.progress_hold)
 
-        self.lbl_fingers_debug = QLabel("Trạng thái 5 ngón [Cái, Trỏ, Giữa, Áp, Út]: [-, -, -, -, -]")
+        self.lbl_fingers_debug = theme.label(
+            "5 ngón [Cái, Trỏ, Giữa, Áp, Út]: [-, -, -, -, -]", role="mono"
+        )
         self.lbl_fingers_debug.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.lbl_fingers_debug.setStyleSheet("color: #94a3b8; font-size: 12px;")
         detect_layout.addWidget(self.lbl_fingers_debug)
+        return detect_card
 
-        right_col.addWidget(detect_card)
+    def _install_shortcuts(self) -> None:
+        for idx, mode_id in enumerate(
+            (self.MODE_ASL, self.MODE_TOUCHLESS, self.MODE_AIR_MOUSE, self.MODE_PRESENTATION)
+        ):
+            sc = QShortcut(QKeySequence(f"Ctrl+{idx + 1}"), self)
+            sc.activated.connect(lambda m=mode_id: self._switch_mode(m))
+        cam_sc = QShortcut(QKeySequence("Ctrl+Space"), self)
+        cam_sc.activated.connect(lambda: self.toggle_camera(start_only=False))
 
-        # 3. Stacked Widget chứa giao diện riêng của từng chế độ
-        self.stacked_panels = QStackedWidget()
-        self.stacked_panels.addWidget(self._create_asl_panel())
-        self.stacked_panels.addWidget(self._create_touchless_panel())
-        self.stacked_panels.addWidget(self._create_air_mouse_panel())
-        self.stacked_panels.addWidget(self._create_presentation_panel())
-        right_col.addWidget(self.stacked_panels, stretch=1)
+    def _set_hero_tone(self, tone: str) -> None:
+        """Đổi màu nhãn chính theo trạng thái (chỉ repolish khi có thay đổi)."""
+        if tone != self._hero_tone:
+            self._hero_tone = tone
+            theme.set_tone(self.lbl_current_symbol, tone)
 
-        root_layout.addLayout(right_col, stretch=5)
-
+    # ------------------------------------------------------------------
+    # Các bảng điều khiển theo chế độ
+    # ------------------------------------------------------------------
     def _create_asl_panel(self) -> QWidget:
-        """Tạo giao diện cho Chế độ 1: Ghép chữ cái Ngôn ngữ Ký hiệu (A-Z) & Phát giọng nói."""
-        card = QFrame()
-        card.setObjectName("Card")
-        layout = QVBoxLayout(card)
-        layout.setSpacing(10)
+        """Chế độ ASL: bảng hiển thị chữ A-Z, gợi ý từ, đọc thành tiếng, tra nhanh và cá nhân hóa mẫu."""
+        card, layout = theme.card(spacing=T.SP_2, margins=(16, 12, 16, 12))
 
-        title = QLabel("SOẠN THẢO NGÔN NGỮ KÝ HIỆU (ASL A-Z)")
-        title.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
-        title.setStyleSheet("color: #38bdf8;")
-        layout.addWidget(title)
+        # Tiêu đề bảng hiển thị chữ + bộ đếm ký tự trực tiếp
+        head_row = QHBoxLayout()
+        head_row.setSpacing(T.SP_2)
+        head_row.addWidget(theme.caption("Bảng hiển thị chữ đã nhận diện (ASL A–Z)"))
+        head_row.addStretch()
+        self.lbl_char_count = theme.pill("0 ký tự", "neutral")
+        self.lbl_char_count.setAccessibleName("Số ký tự đã ghép")
+        head_row.addWidget(self.lbl_char_count)
+        layout.addLayout(head_row)
 
         self.txt_sentence = QLineEdit()
-        self.txt_sentence.setPlaceholderText("Các chữ cái A-Z nhận diện được sẽ ghép tại đây...")
+        self.txt_sentence.setProperty("role", "sentence")
+        self.txt_sentence.setPlaceholderText("Chữ cái A–Z sẽ hiện tại đây…")
+        pal = self.txt_sentence.palette()
+        pal.setColor(QPalette.ColorRole.PlaceholderText, QColor(T.MUTED))
+        self.txt_sentence.setPalette(pal)
+        self.txt_sentence.setAccessibleName("Bảng hiển thị chữ đã nhận diện")
         self.txt_sentence.textChanged.connect(self._on_sentence_edited)
         layout.addWidget(self.txt_sentence)
 
-        # Hàng nút gợi ý từ thông minh (Autocomplete)
+        # Gợi ý từ (Autocomplete)
         sugg_layout = QHBoxLayout()
-        sugg_label = QLabel("Gợi ý từ:")
-        sugg_label.setStyleSheet("color: #94a3b8; font-size: 12px;")
-        sugg_layout.addWidget(sugg_label)
-
+        sugg_layout.setSpacing(T.SP_2)
+        sugg_layout.addWidget(theme.caption("Gợi ý từ"))
         self.sugg_buttons: List[QPushButton] = []
         for _ in range(3):
-            btn = QPushButton("-")
-            btn.setStyleSheet("background-color: #334155; font-size: 12px; padding: 5px 10px;")
+            btn = theme.button("-", role="chip", tooltip="Bấm để chọn từ gợi ý")
             btn.clicked.connect(self._on_suggestion_clicked)
             sugg_layout.addWidget(btn)
             self.sugg_buttons.append(btn)
+        sugg_layout.addStretch()
         layout.addLayout(sugg_layout)
         self._refresh_suggestion_buttons()
 
-        # Hàng nút thao tác văn bản & giọng nói
-        action_grid = QGridLayout()
-        btn_speak = QPushButton("Đọc to câu (Speak TTS)")
-        btn_speak.setStyleSheet("background-color: #059669; font-size: 14px;")
-        btn_speak.clicked.connect(lambda: self.translator.speak_async(self.txt_sentence.text()))
-
-        btn_space = QPushButton("Dấu cách (Space)")
-        btn_space.clicked.connect(self._action_space)
-
-        btn_backspace = QPushButton("Xóa 1 chữ (Backspace)")
-        btn_backspace.clicked.connect(self._action_backspace)
-
-        btn_clear = QPushButton("Xóa hết (Clear)")
-        btn_clear.setObjectName("DangerBtn")
-        btn_clear.clicked.connect(self._action_clear)
-
-        action_grid.addWidget(btn_speak, 0, 0, 1, 2)
-        action_grid.addWidget(btn_space, 1, 0)
-        action_grid.addWidget(btn_backspace, 1, 1)
-        action_grid.addWidget(btn_clear, 2, 0, 1, 2)
-        layout.addLayout(action_grid)
-
-        # Nút mở cửa sổ Hướng dẫn trực quan 21 khớp xương cho từng chữ cái A-Z
-        btn_open_guide = QPushButton("📖 Mở Bảng Hướng Dẫn Cử Chỉ A-Z (Có hình minh họa 21 khớp)")
-        btn_open_guide.setStyleSheet(
-            "background-color: #7c3aed; color: #ffffff; font-size: 13px; padding: 8px;"
+        # Thao tác văn bản, giọng nói & mở bảng minh họa A–Z (gọn trong 2 hàng)
+        btn_speak = theme.button(
+            "Đọc to câu",
+            variant="primary",
+            tooltip="Đọc câu hiện tại thành tiếng (Text-to-Speech)",
+            on_click=lambda: self.translator.speak_async(self.txt_sentence.text()),
         )
-        btn_open_guide.clicked.connect(self._open_asl_guide_dialog)
-        layout.addWidget(btn_open_guide)
-
-        # Khung tra cứu nhanh cử chỉ chữ cái A-Z cuộn trực tiếp trên màn hình chính
-        guide_scroll = QScrollArea()
-        guide_scroll.setWidgetResizable(True)
-        guide_scroll.setStyleSheet(
-            "QScrollArea { background-color: #0f172a; border: 1px solid #334155; border-radius: 8px; }"
+        btn_guide = theme.button(
+            "Hướng dẫn A–Z",
+            tooltip="Mở cửa sổ hình minh họa 21 khớp cho từng chữ cái A–Z",
+            on_click=self._open_asl_guide_dialog,
         )
-        guide_inner = QWidget()
-        guide_inner.setStyleSheet("background-color: #0f172a;")
-        guide_inner_layout = QVBoxLayout(guide_inner)
-        guide_inner_layout.setContentsMargins(8, 6, 8, 6)
-        guide_inner_layout.setSpacing(4)
+        btn_space = theme.button("Dấu cách", tooltip="Chèn dấu cách (Space)", on_click=self._action_space)
+        btn_backspace = theme.button("Xóa 1 chữ", tooltip="Xóa ký tự cuối (Backspace)", on_click=self._action_backspace)
+        btn_clear = theme.button("Xóa hết", variant="danger", tooltip="Xóa toàn bộ câu (Clear)", on_click=self._action_clear)
 
-        lbl_quick_header = QLabel(
-            "<b style='color:#f59e0b;'>BẢNG TRA NHANH CỬ CHỈ [Cái, Trỏ, Giữa, Áp, Út] (1=Mở, 0=Gập):</b>"
-        )
-        lbl_quick_header.setStyleSheet("font-size: 11px;")
-        guide_inner_layout.addWidget(lbl_quick_header)
+        actions = QGridLayout()
+        actions.setSpacing(T.SP_2)
+        actions.addWidget(btn_speak, 0, 0, 1, 2)
+        actions.addWidget(btn_guide, 0, 2)
+        actions.addWidget(btn_space, 1, 0)
+        actions.addWidget(btn_backspace, 1, 1)
+        actions.addWidget(btn_clear, 1, 2)
+        layout.addLayout(actions)
 
-        for k, meta in ASL_GESTURE_GUIDE.items():
-            item_lbl = QLabel(
-                f"<b style='color:#38bdf8;'>{k}</b> "
-                f"<span style='color:#10b981; font-family:Consolas;'>{meta['fingers']}</span>: "
-                f"<span style='color:#cbd5e1;'>{meta['short']}</span>"
-            )
-            item_lbl.setWordWrap(True)
-            item_lbl.setStyleSheet("font-size: 11px; padding: 2px 0px; border-bottom: 1px solid #1e293b;")
-            guide_inner_layout.addWidget(item_lbl)
+        # Vùng cuộn duy nhất phía dưới (Cá nhân hóa + Tra nhanh A–Z),
+        # để phần Bảng hiển thị chữ & nút thao tác phía trên luôn cố định ở mọi độ phân giải.
+        lower_scroll = QScrollArea()
+        lower_scroll.setWidgetResizable(True)
+        lower_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        lower_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        lower_scroll.setMinimumHeight(72)
 
-        guide_scroll.setWidget(guide_inner)
-        layout.addWidget(guide_scroll, stretch=1)
+        lower_inner = QWidget()
+        lower_layout = QVBoxLayout(lower_inner)
+        lower_layout.setContentsMargins(0, 0, T.SP_1, 0)
+        lower_layout.setSpacing(T.SP_2)
 
-        # Khung dạy nhanh mẫu 21-keypoints cho chữ cái bất kỳ (Quick Calibration)
-        calib_box = QFrame()
-        calib_box.setStyleSheet("background-color: #0f172a; border-radius: 8px; padding: 6px;")
-        calib_layout = QVBoxLayout(calib_box)
-        lbl_calib = QLabel("Cá nhân hóa nhanh 21-Keypoints cho tay của bạn:")
-        lbl_calib.setStyleSheet("color: #cbd5e1; font-size: 12px; font-weight: bold;")
-        calib_layout.addWidget(lbl_calib)
-
+        # Cá nhân hóa nhanh mẫu 21 điểm khớp
+        calib_frame, calib_layout = theme.inset(spacing=T.SP_1, margins=(12, 8, 12, 8))
+        calib_layout.addWidget(theme.caption("Cá nhân hóa 21 điểm khớp cho tay của bạn"))
         calib_row = QHBoxLayout()
+        calib_row.setSpacing(T.SP_2)
         self.combo_calib_letter = QComboBox()
+        self.combo_calib_letter.setMinimumWidth(88)
+        self.combo_calib_letter.setAccessibleName("Ký hiệu cần lưu mẫu")
         for ch in [chr(c) for c in range(ord("A"), ord("Z") + 1)] + ["SPACE", "DEL"]:
             self.combo_calib_letter.addItem(ch)
         self.combo_calib_letter.currentTextChanged.connect(self._on_calib_letter_changed)
-        btn_save_kpt = QPushButton("Lưu mẫu tư thế tay hiện tại")
-        btn_save_kpt.clicked.connect(self._save_current_keypoint_sample)
+        btn_save_kpt = theme.button(
+            "Lưu mẫu tư thế hiện tại",
+            tooltip="Lưu tư thế tay đang hiển thị làm mẫu cho ký hiệu đã chọn",
+            on_click=self._save_current_keypoint_sample,
+        )
         calib_row.addWidget(self.combo_calib_letter)
         calib_row.addWidget(btn_save_kpt, stretch=1)
         calib_layout.addLayout(calib_row)
 
-        self.lbl_calib_hint = QLabel()
-        self.lbl_calib_hint.setWordWrap(True)
-        self.lbl_calib_hint.setStyleSheet("color: #38bdf8; font-size: 11px; padding-top: 2px;")
+        self.lbl_calib_hint = theme.label("", role="subtitle", wrap=True)
         calib_layout.addWidget(self.lbl_calib_hint)
         self._on_calib_letter_changed("A")
+        lower_layout.addWidget(calib_frame)
 
-        layout.addWidget(calib_box)
+        # Bảng tra nhanh cử chỉ A–Z
+        guide_frame, guide_layout = theme.inset(spacing=T.SP_1, margins=(12, 8, 12, 8))
+        guide_layout.addWidget(theme.caption("Tra nhanh [Cái, Trỏ, Giữa, Áp, Út] · 1 = mở, 0 = gập"))
+        for k, meta in ASL_GESTURE_GUIDE.items():
+            row = theme.label(
+                f"<b style='color:{T.ACCENT};'>{k}</b>&nbsp;&nbsp;"
+                f"<span style='color:{T.SUCCESS}; font-family:Consolas;'>{meta['fingers']}</span>&nbsp;&nbsp;"
+                f"<span style='color:{T.TEXT};'>{meta['short']}</span>",
+                role="guide-row",
+                wrap=True,
+            )
+            guide_layout.addWidget(row)
+        lower_layout.addWidget(guide_frame)
+        lower_layout.addStretch()
+
+        lower_scroll.setWidget(lower_inner)
+        layout.addWidget(lower_scroll, stretch=1)
         return card
 
     def _create_touchless_panel(self) -> QWidget:
-        """Tạo giao diện cho Chế độ 2: Điều khiển Thiết bị Không chạm (Touchless Control)."""
-        card = QFrame()
-        card.setObjectName("Card")
-        layout = QVBoxLayout(card)
-        layout.setSpacing(10)
+        """Chế độ điều khiển media không chạm."""
+        card, layout = theme.card(spacing=T.SP_2, margins=(16, 14, 16, 14))
+        layout.addLayout(
+            theme.panel_header(
+                "Điều khiển Windows không chạm",
+                "Thực hiện cử chỉ và giữ ổn định để kích hoạt lệnh.",
+            )
+        )
 
-        title = QLabel("ĐIỀU KHIỂN WINDOWS KHÔNG CHẠM (TOUCHLESS)")
-        title.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
-        title.setStyleSheet("color: #f59e0b;")
-        layout.addWidget(title)
-
-        # Thanh hiển thị âm lượng hệ thống hiện tại
         vol_row = QHBoxLayout()
-        vol_row.addWidget(QLabel("Âm lượng Windows:"))
+        vol_row.setSpacing(T.SP_3)
+        vol_row.addWidget(theme.caption("Âm lượng Windows"))
         self.progress_volume = QProgressBar()
         self.progress_volume.setRange(0, 100)
         self.progress_volume.setValue(self.media_ctrl.current_volume_percent)
         self.progress_volume.setFormat("%p%")
+        self.progress_volume.setProperty("tone", "ok")
+        self.progress_volume.setAccessibleName("Âm lượng Windows hiện tại")
         vol_row.addWidget(self.progress_volume, stretch=1)
         layout.addLayout(vol_row)
 
-        # Checkbox bật/tắt kéo âm lượng bằng khoảng cách Ngón cái - Ngón trỏ (Pinch)
-        self.chk_pinch_volume = QCheckBox(
-            "Bật Pinch Volume (Giơ Cái + Trỏ [1,1,0,0,0] kéo khoảng cách để chỉnh âm lượng 0-100%)"
-        )
+        self.chk_pinch_volume = QCheckBox("Bật Pinch Volume")
         self.chk_pinch_volume.setChecked(False)
+        self.chk_pinch_volume.setToolTip("Giơ Cái + Trỏ [1,1,0,0,0], kéo khoảng cách để chỉnh âm lượng 0–100%")
         layout.addWidget(self.chk_pinch_volume)
-
-        # Trạng thái lệnh vừa thực thi
-        self.lbl_last_command = QLabel("Lệnh gần nhất: Chưa có")
-        self.lbl_last_command.setStyleSheet(
-            "background-color: #0f172a; color: #38bdf8; padding: 8px; border-radius: 6px; font-weight: bold;"
+        layout.addWidget(
+            theme.label(
+                "Giơ ngón Cái + Trỏ, kéo khoảng cách để chỉnh 0–100%. "
+                "Giữ yên ~0,7 giây để khóa mức âm lượng.",
+                role="subtitle",
+                wrap=True,
+            )
         )
+
+        self.lbl_last_command = theme.label("Lệnh gần nhất: Chưa có", role="status", tone="idle", wrap=True)
         layout.addWidget(self.lbl_last_command)
 
-        # Bảng hướng dẫn các cử chỉ điều khiển
-        guide_text = (
-            "BẢNG CỬ CHỈ ĐIỀU KHIỂN:\n"
-            "• Xòe 5 ngón (OPEN_PALM)   : Play / Pause Video & Nhạc\n"
-            "• Nắm đấm (FIST)           : Bật / Tắt tiếng (Mute / Unmute)\n"
-            "• Giơ ngón cái lên (UP)    : Tăng âm lượng (+6%)\n"
-            "• Chúc ngón cái xuống      : Giảm âm lượng (-6%)\n"
-            "• Chỉ trỏ sang Phải / Trái : Qua bài (Next) / Lùi bài (Prev)\n"
-            "• Giơ 2 ngón chữ V (PEACE) : Chụp ảnh màn hình (Screenshot)\n\n"
-            "PINCH VOLUME: kéo Cái-Trỏ để chỉnh, GIỮ YÊN ~0,7s để KHÓA.\n"
-            "Muốn chỉnh lại: hạ tay hoặc đổi tư thế rồi làm lại."
+        layout.addWidget(theme.caption("Bảng cử chỉ"))
+        layout.addWidget(
+            theme.guide_list(
+                [
+                    ("Xòe 5 ngón", "Phát / tạm dừng video và nhạc"),
+                    ("Nắm đấm", "Bật / tắt tiếng"),
+                    ("Ngón cái lên", "Tăng âm lượng +6%"),
+                    ("Ngón cái xuống", "Giảm âm lượng −6%"),
+                    ("Chỉ trỏ phải / trái", "Bài kế tiếp / bài trước"),
+                    ("Hai ngón chữ V", "Chụp ảnh màn hình"),
+                ]
+            )
         )
-        lbl_guide = QLabel(guide_text)
-        lbl_guide.setStyleSheet(
-            "background-color: #0f172a; color: #cbd5e1; padding: 10px; border-radius: 8px; font-size: 12px; line-height: 1.4;"
-        )
-        layout.addWidget(lbl_guide)
         layout.addStretch()
         return card
 
     def _create_air_mouse_panel(self) -> QWidget:
-        """Chế độ 3: Điều khiển chuột Windows bằng ngón trỏ."""
-        card = QFrame()
-        card.setObjectName("Card")
-        layout = QVBoxLayout(card)
-        layout.setSpacing(10)
+        """Chế độ chuột không chạm."""
+        card, layout = theme.card(spacing=T.SP_3)
+        layout.addLayout(
+            theme.panel_header(
+                "Chuột không chạm (Air Mouse)",
+                f"Điều khiển con trỏ trên màn hình {self.air_mouse.screen_w} × {self.air_mouse.screen_h}.",
+            )
+        )
 
-        title = QLabel("CHUỘT KHÔNG CHẠM (AIR MOUSE)")
-        title.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
-        title.setStyleSheet("color: #a78bfa;")
-        layout.addWidget(title)
-
-        self.chk_air_mouse = QCheckBox("Kích hoạt điều khiển con trỏ chuột (bỏ chọn để tạm dừng)")
+        self.chk_air_mouse = QCheckBox("Kích hoạt điều khiển con trỏ chuột")
         self.chk_air_mouse.setChecked(False)
+        self.chk_air_mouse.setToolTip("Bỏ chọn để tạm dừng, chuột thật sẽ được trả lại ngay")
         self.chk_air_mouse.toggled.connect(lambda on: None if on else self.air_mouse.release())
         layout.addWidget(self.chk_air_mouse)
 
-        self.lbl_mouse_state = QLabel("Trạng thái: Chưa kích hoạt")
-        self.lbl_mouse_state.setStyleSheet(
-            "background-color: #0f172a; color: #a78bfa; padding: 8px; border-radius: 6px; font-weight: bold;"
-        )
+        self.lbl_mouse_state = theme.label("Trạng thái: Chưa kích hoạt", role="status", tone="idle", wrap=True)
         layout.addWidget(self.lbl_mouse_state)
 
         pinch_row = QHBoxLayout()
-        pinch_row.addWidget(QLabel("Chụm Cái-Trỏ:"))
+        pinch_row.setSpacing(T.SP_3)
+        pinch_row.addWidget(theme.caption("Độ chụm Cái–Trỏ"))
         self.progress_pinch_left = QProgressBar()
         self.progress_pinch_left.setRange(0, 100)
         self.progress_pinch_left.setFormat("%p%")
+        self.progress_pinch_left.setAccessibleName("Độ chụm ngón cái và ngón trỏ")
         pinch_row.addWidget(self.progress_pinch_left, stretch=1)
         layout.addLayout(pinch_row)
 
-        guide = QLabel(
-            "HƯỚNG DẪN:\n"
-            "• Di chuyển đầu ngón trỏ trong khung tím : Di chuyển con trỏ\n"
-            "• Chụm Cái + Trỏ nhanh rồi nhả         : Nhấp chuột trái\n"
-            "• Chụm Cái + Trỏ và giữ > 0,35 giây    : Kéo thả (Drag)\n"
-            "• Chụm Cái + Giữa (Trỏ vẫn mở)        : Nhấp chuột phải\n"
-            "• Nắm tay lại                           : Tạm dừng con trỏ để\n"
-            "                                          đặt lại vị trí tay\n\n"
-            f"Màn hình: {self.air_mouse.screen_w} x {self.air_mouse.screen_h}"
+        layout.addWidget(theme.caption("Hướng dẫn"))
+        layout.addWidget(
+            theme.guide_list(
+                [
+                    ("Di chuyển ngón trỏ", "Điều khiển con trỏ trong khung xanh trên camera"),
+                    ("Chụm Cái + Trỏ", "Nhấp chuột trái · giữ hơn 0,35 giây để kéo thả"),
+                    ("Chụm Cái + Giữa", "Nhấp chuột phải (ngón trỏ vẫn mở)"),
+                    ("Nắm tay", "Tạm dừng con trỏ để đặt lại vị trí tay"),
+                ]
+            )
         )
-        guide.setStyleSheet(
-            "background-color: #0f172a; color: #cbd5e1; padding: 10px; border-radius: 8px; font-size: 12px;"
-        )
-        layout.addWidget(guide)
         layout.addStretch()
         return card
 
     def _create_presentation_panel(self) -> QWidget:
-        """Chế độ 4: Tia laser ảo + lật slide bằng vẫy tay."""
-        card = QFrame()
-        card.setObjectName("Card")
-        layout = QVBoxLayout(card)
-        layout.setSpacing(10)
-
-        title = QLabel("THUYẾT TRÌNH THÔNG MINH (LASER & SLIDE)")
-        title.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
-        title.setStyleSheet("color: #f87171;")
-        layout.addWidget(title)
+        """Chế độ thuyết trình: tia laser ảo và lật slide bằng vẫy tay."""
+        card, layout = theme.card(spacing=T.SP_3)
+        layout.addLayout(
+            theme.panel_header(
+                "Thuyết trình thông minh",
+                "Tia laser ảo và lật slide bằng cử chỉ, không cần cầm điều khiển.",
+            )
+        )
 
         self.chk_laser = QCheckBox("Hiển thị tia laser đỏ trên toàn màn hình")
         self.chk_laser.setChecked(True)
@@ -624,30 +634,30 @@ class SignAndGestureApp(QMainWindow):
         self.chk_swipe.setChecked(True)
         layout.addWidget(self.chk_swipe)
 
-        self.lbl_present_state = QLabel("Trạng thái: Chờ cử chỉ")
-        self.lbl_present_state.setStyleSheet(
-            "background-color: #0f172a; color: #f87171; padding: 8px; border-radius: 6px; font-weight: bold;"
-        )
+        self.lbl_present_state = theme.label("Trạng thái: Chờ cử chỉ", role="status", tone="idle", wrap=True)
         layout.addWidget(self.lbl_present_state)
 
-        self.lbl_slide_event = QLabel("Lệnh slide gần nhất: Chưa có")
-        self.lbl_slide_event.setStyleSheet(
-            "background-color: #0f172a; color: #38bdf8; padding: 8px; border-radius: 6px; font-weight: bold;"
-        )
+        self.lbl_slide_event = theme.label("Lệnh slide gần nhất: Chưa có", role="status", tone="idle", wrap=True)
         layout.addWidget(self.lbl_slide_event)
 
-        guide = QLabel(
-            "HƯỚNG DẪN:\n"
-            "• Chỉ giơ ngón trỏ       : Hiện tia laser đỏ theo ngón tay\n"
-            "• Xòe tay, vẫy sang TRÁI : Slide tiếp theo (phím →)\n"
-            "• Xòe tay, vẫy sang PHẢI : Slide trước (phím ←)\n\n"
-            "Mẹo: mở PowerPoint ở chế độ trình chiếu (F5) rồi\n"
-            "bấm vào cửa sổ trình chiếu để nó nhận phím."
+        layout.addWidget(theme.caption("Hướng dẫn"))
+        layout.addWidget(
+            theme.guide_list(
+                [
+                    ("Chỉ ngón trỏ", "Hiện tia laser đỏ theo đầu ngón tay"),
+                    ("Xòe tay, vẫy trái", "Slide tiếp theo (phím →)"),
+                    ("Xòe tay, vẫy phải", "Slide trước (phím ←)"),
+                ]
+            )
         )
-        guide.setStyleSheet(
-            "background-color: #0f172a; color: #cbd5e1; padding: 10px; border-radius: 8px; font-size: 12px;"
+        layout.addWidget(
+            theme.label(
+                "Mẹo: mở PowerPoint ở chế độ trình chiếu (F5) rồi bấm vào cửa sổ trình chiếu "
+                "để nó nhận phím.",
+                role="subtitle",
+                wrap=True,
+            )
         )
-        layout.addWidget(guide)
         layout.addStretch()
         return card
 
@@ -665,13 +675,16 @@ class SignAndGestureApp(QMainWindow):
 
         self.current_mode = mode
         self.voting_buffer.reset()
+        self.cooldown_timer.check_trigger(None)
+        self._block_cmds_until = 0.0
         self.progress_hold.setValue(0)
         if mode == self.MODE_TOUCHLESS:
             self.progress_volume.setValue(self.media_ctrl.refresh_volume())
         for mode_id, btn in self.mode_buttons.items():
-            btn.setObjectName("ModeActive" if mode_id == mode else "ModeInactive")
+            btn.blockSignals(True)
+            btn.setChecked(mode_id == mode)
+            btn.blockSignals(False)
         self.stacked_panels.setCurrentIndex(mode)
-        self.setStyleSheet(DARK_STYLESHEET)
 
     def _is_pinch_active(self) -> bool:
         return (
@@ -699,31 +712,121 @@ class SignAndGestureApp(QMainWindow):
                 self._start_ai_worker()
                 self.timer.start(16)
                 self.btn_cam_toggle.setText("Tạm dừng Camera")
+                self.lbl_cam_status.setText("● Camera: bật")
+                theme.set_tone(self.lbl_cam_status, "ok")
             else:
-                self.video_label.setText("Không tìm thấy Webcam! Hãy kiểm tra kết nối Camera.")
+                self.btn_cam_toggle.setText("Bật lại Camera")
+                self.video_label.setText(
+                    "Không tìm thấy webcam.\nKiểm tra kết nối camera rồi bấm “Bật lại Camera”."
+                )
+                self.lbl_cam_status.setText("▲ Không có camera")
+                theme.set_tone(self.lbl_cam_status, "danger")
         elif not start_only:
             self.timer.stop()
             self._stop_ai_worker()
             self.camera.stop()
+            self.air_mouse.release()
+            self.presenter.reset()
+            self.laser_overlay.set_point(None)
             self.btn_cam_toggle.setText("Bật lại Camera")
-            self.video_label.setText("Camera đang tạm dừng.")
+            self.video_label.setPixmap(QPixmap())
+            self.video_label.setText("Camera đang tạm dừng.\nBấm “Bật lại Camera” hoặc Ctrl+Space để tiếp tục.")
+            self.lbl_cam_status.setText("■ Camera: tắt")
+            theme.set_tone(self.lbl_cam_status, "warn")
+            self._set_hero_tone("idle")
+            self.lbl_current_symbol.setText("Camera đang tạm dừng")
 
     def _browse_model_file(self) -> None:
+        models_dir = os.path.join(PROJECT_ROOT, "models")
+        initial_dir = models_dir if os.path.isdir(models_dir) else PROJECT_ROOT
         filepath, _ = QFileDialog.getOpenFileName(
             self,
             "Chọn file trọng số YOLOv11-Pose (.pt / .onnx)",
-            os.getcwd(),
+            initial_dir,
             "YOLO Weights (*.pt *.onnx)",
         )
         if filepath:
+            if filepath.lower().endswith(".onnx") and importlib.util.find_spec("onnxruntime") is None:
+                QMessageBox.warning(
+                    self,
+                    "Thiếu thư viện ONNX Runtime",
+                    f"Không thể nạp file ONNX '{filepath}' vì môi trường chưa cài đặt 'onnxruntime'.\n"
+                    "Vui lòng cài đặt 'onnxruntime' hoặc chọn file trọng số PyTorch (.pt).",
+                )
+                return
             was_running = self.camera.running
             self._stop_ai_worker()
             ok = self.detector.load_model(filepath)
             self.lbl_model_status.setText(f"Model: {self.detector.model_loaded_name}")
+            theme.set_tone(self.lbl_model_status, "neutral" if ok else "danger")
             if was_running:
                 self._start_ai_worker()
             if not ok:
-                QMessageBox.warning(self, "Lỗi nạp model", f"Không thể nạp file: {filepath}")
+                QMessageBox.warning(
+                    self,
+                    "Lỗi nạp model",
+                    f"Không thể nạp file: {filepath}\nTrạng thái: {self.detector.model_loaded_name}",
+                )
+
+    @staticmethod
+    def _draw_active_region(frame: np.ndarray, p1: tuple, p2: tuple, color: tuple) -> None:
+        """Vẽ khung vùng hoạt động gọn gàng kèm 4 góc nhấn cho Air Mouse / Thuyết trình."""
+        cv2.rectangle(frame, p1, p2, color, 1, cv2.LINE_AA)
+        x1, y1 = p1
+        x2, y2 = p2
+        arm = 14
+        for (cx, cy, dx, dy) in (
+            (x1, y1, arm, arm),
+            (x2, y1, -arm, arm),
+            (x1, y2, arm, -arm),
+            (x2, y2, -arm, -arm),
+        ):
+            cv2.line(frame, (cx, cy), (cx + dx, cy), color, 2, cv2.LINE_AA)
+            cv2.line(frame, (cx, cy), (cx, cy + dy), color, 2, cv2.LINE_AA)
+
+    @staticmethod
+    def _draw_asl_badge(frame: np.ndarray, bbox: tuple, label: str, conf: float, committed: bool) -> None:
+        """Vẽ nhãn chữ cái ASL đang nhận diện ngay phía trên khung bàn tay."""
+        h_f, w_f = frame.shape[:2]
+        x1, y1, _, _ = bbox
+        txt = f"ASL: {label} ({conf * 100:.0f}%)"
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        (tw, th), _ = cv2.getTextSize(txt, font, 0.65, 2)
+        px = max(8, min(x1, w_f - tw - 20))
+        py = max(th + 14, y1 - 8)
+        bg_p1 = (px - 6, py - th - 8)
+        bg_p2 = (px + tw + 8, py + 6)
+        border = (153, 211, 52) if committed else (248, 189, 56)
+        cv2.rectangle(frame, bg_p1, bg_p2, (32, 18, 11), -1)
+        cv2.rectangle(frame, bg_p1, bg_p2, border, 1, cv2.LINE_AA)
+        cv2.putText(frame, txt, (px, py), font, 0.65, border, 2, cv2.LINE_AA)
+
+    @staticmethod
+    def _draw_asl_caption_bar(frame: np.ndarray, sentence: str) -> None:
+        """Vẽ dải phụ đề văn bản đã ghép ở mép dưới khung camera khi ở chế độ ASL."""
+        clean = "".join(ch for ch in sentence if 32 <= ord(ch) < 127)
+        if not clean:
+            return
+        display = clean[-30:]
+        if len(clean) > 30:
+            display = "..." + display
+        h_f, w_f = frame.shape[:2]
+        bar_h = 38
+        y0 = max(0, h_f - bar_h)
+        roi = frame[y0:h_f, 0:w_f]
+        overlay = np.full_like(roi, (32, 18, 11))
+        cv2.addWeighted(overlay, 0.78, roi, 0.22, 0.0, roi)
+        cv2.line(frame, (0, y0), (w_f, y0), (248, 189, 56), 1, cv2.LINE_AA)
+        cv2.putText(
+            frame,
+            f"TEXT: {display}",
+            (14, h_f - 12),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.72,
+            (248, 189, 56),
+            2,
+            cv2.LINE_AA,
+        )
 
     def _process_frame(self) -> None:
         if self._ai_worker is None:
@@ -734,12 +837,12 @@ class SignAndGestureApp(QMainWindow):
 
         seq, frame, annotated, analyses, raw_kpts, cam_fps, ai_fps, infer_ms = packet
         self._last_ai_seq = seq
-        self.lbl_fps.setText(f"Cam: {cam_fps:.1f} | AI: {ai_fps:.1f} FPS")
+        self.lbl_fps.setText(f"Cam {cam_fps:.1f} · AI {ai_fps:.1f} FPS")
         self.last_analyses = analyses
 
         # Cập nhật biểu đồ hiệu năng (FPS & Latency ms)
         self.chart_perf.push([cam_fps, infer_ms])
-        self.chart_perf.set_footer(f"Cam: {cam_fps:.1f} fps  |  AI: {infer_ms:.1f} ms")
+        self.chart_perf.set_footer(f"Cam: {cam_fps:.1f} fps · AI: {infer_ms:.1f} ms")
 
         h_f, w_f = annotated.shape[:2]
 
@@ -748,13 +851,14 @@ class SignAndGestureApp(QMainWindow):
             rx1, ry1, rx2, ry2 = DEFAULT_ACTIVE_REGION
             p1 = (int(rx1 * w_f), int(ry1 * h_f))
             p2 = (int(rx2 * w_f), int(ry2 * h_f))
-            box_color = (250, 139, 167) if self.current_mode == self.MODE_AIR_MOUSE else (113, 113, 248)
-            cv2.rectangle(annotated, p1, p2, box_color, 1, cv2.LINE_AA)
+            # BGR cho T.ACCENT (#38bdf8) và T.DANGER (#f87171)
+            box_color = (248, 189, 56) if self.current_mode == self.MODE_AIR_MOUSE else (113, 113, 248)
+            self._draw_active_region(annotated, p1, p2, box_color)
 
         if analyses:
             primary = analyses[0]
             self.lbl_fingers_debug.setText(
-                f"Trạng thái 5 ngón [Cái, Trỏ, Giữa, Áp, Út]: {primary.fingers_up}"
+                f"5 ngón [Cái, Trỏ, Giữa, Áp, Út]: {primary.fingers_up}"
             )
 
             # Cập nhật biểu đồ sóng Telemetry (Raw vs 1€ Filter trên đầu ngón trỏ Kpt 8)
@@ -767,7 +871,7 @@ class SignAndGestureApp(QMainWindow):
                 raw_jit = float(np.std(np.diff(np.array(self._raw_hist))))
                 smt_jit = float(np.std(np.diff(np.array(self._smooth_hist))))
                 self.chart_kpt.set_footer(
-                    f"Rung ΔRaw: {raw_jit:.2f}px  →  Δ1€: {smt_jit:.2f}px"
+                    f"Rung ΔRaw: {raw_jit:.2f}px → Δ1€: {smt_jit:.2f}px"
                 )
 
             if self.current_mode == self.MODE_ASL:
@@ -776,12 +880,17 @@ class SignAndGestureApp(QMainWindow):
                 )
                 disp = candidate or primary.asl_label
                 self.lbl_current_symbol.setText(f"Ký hiệu: {disp} ({primary.asl_confidence * 100:.0f}%)")
+                self._set_hero_tone("ok" if committed else "active")
                 self.progress_hold.setValue(int(progress * 100))
+                self._draw_asl_badge(annotated, primary.bbox, disp, primary.asl_confidence, bool(committed))
 
                 if committed:
                     new_text = self.translator.append_symbol(committed)
                     self.txt_sentence.setText(new_text)
+                    theme.set_tone(self.txt_sentence, "ok")
                     self._refresh_suggestion_buttons()
+                elif progress < 0.99:
+                    theme.set_tone(self.txt_sentence, "active")
 
             elif self.current_mode == self.MODE_TOUCHLESS:
                 # Chế độ 2: Điều khiển Không chạm (Touchless Media Control)
@@ -801,30 +910,35 @@ class SignAndGestureApp(QMainWindow):
                     self.cooldown_timer.check_trigger(None)
                     self._block_cmds_until = time.perf_counter() + 1.0
                     if lock_state == "LOCKED":
-                        self.lbl_current_symbol.setText(f"🔒 ĐÃ KHÓA: {vol_pct}%")
+                        self._set_hero_tone("ok")
+                        self.lbl_current_symbol.setText(f"Đã khóa âm lượng: {vol_pct}%")
                         self.progress_hold.setValue(100)
                         self.lbl_last_command.setText(
-                            f"Đã chốt âm lượng {vol_pct}%. Hạ tay/đổi tư thế rồi làm lại để chỉnh tiếp."
+                            f"Đã chốt âm lượng {vol_pct}%. Hạ tay hoặc đổi tư thế rồi làm lại để chỉnh tiếp."
                         )
+                        theme.set_tone(self.lbl_last_command, "ok")
                         cv2.putText(
                             annotated,
                             f"LOCKED: {vol_pct}%",
                             (16, 36),
                             cv2.FONT_HERSHEY_SIMPLEX,
-                            0.9,
-                            (80, 255, 140),
+                            0.85,
+                            (153, 211, 52),
                             2,
                             cv2.LINE_AA,
                         )
                     elif lock_state == "ARMING":
-                        self.lbl_current_symbol.setText(f"PINCH: Đang kích hoạt...")
+                        self._set_hero_tone("idle")
+                        self.lbl_current_symbol.setText("Pinch: đang kích hoạt…")
                         self.progress_hold.setValue(0)
                     else:
-                        self.lbl_current_symbol.setText(f"PINCH VOLUME: {vol_pct}%")
+                        self._set_hero_tone("active")
+                        self.lbl_current_symbol.setText(f"Pinch Volume: {vol_pct}%")
                         self.progress_hold.setValue(int(lock_prog * 100))
                         self.lbl_last_command.setText(
-                            f"Đang chỉnh {vol_pct}% - giữ yên tay để khóa"
+                            f"Đang chỉnh {vol_pct}% — giữ yên tay để khóa"
                         )
+                        theme.set_tone(self.lbl_last_command, "active")
                 else:
                     self.pinch_ema.reset()
                     self._handle_pinch_exit()
@@ -832,16 +946,19 @@ class SignAndGestureApp(QMainWindow):
                     if now < self._block_cmds_until:
                         # Đang trong thời gian chặn sau Pinch: không kích hoạt lệnh nào
                         self.cooldown_timer.check_trigger(None)
+                        self._set_hero_tone("idle")
                         self.lbl_current_symbol.setText(f"Cử chỉ: {gesture} (tạm chặn)")
                         self.progress_hold.setValue(0)
                     else:
                         triggered, progress = self.cooldown_timer.check_trigger(gesture)
+                        self._set_hero_tone("ok" if triggered else "active")
                         self.lbl_current_symbol.setText(f"Cử chỉ: {gesture}")
                         self.progress_hold.setValue(int(progress * 100))
                         if triggered:
                             action_msg = self.media_ctrl.execute_gesture_command(gesture, frame=frame)
                             if action_msg:
                                 self.lbl_last_command.setText(f"Lệnh gần nhất: {action_msg}")
+                                theme.set_tone(self.lbl_last_command, "ok")
                                 self.progress_volume.setValue(self.media_ctrl.current_volume_percent)
 
             elif self.current_mode == self.MODE_AIR_MOUSE:
@@ -854,19 +971,26 @@ class SignAndGestureApp(QMainWindow):
                     closeness = int(np.clip((1.0 - r_left / 0.85) * 100, 0, 100))
                     self.progress_pinch_left.setValue(closeness)
                     self.progress_hold.setValue(closeness)
-                    self.lbl_current_symbol.setText(f"AIR MOUSE: {state}")
+                    is_click = state in ("LEFT_DOWN", "DRAG", "RIGHT_CLICK")
+                    self._set_hero_tone("ok" if is_click else ("idle" if state == "PAUSE" else "active"))
+                    self.lbl_current_symbol.setText(f"Air Mouse: {state}")
                     if ev:
                         self.lbl_mouse_state.setText(f"Sự kiện: {ev} ({state})")
+                        theme.set_tone(self.lbl_mouse_state, "ok")
                     else:
                         self.lbl_mouse_state.setText(f"Trạng thái: {state}")
+                        theme.set_tone(self.lbl_mouse_state, "idle" if state == "PAUSE" else "active")
 
                     # Vẽ tâm ngắm tại đầu ngón trỏ (Keypoint 8)
                     ix, iy = int(primary.keypoints[8][0]), int(primary.keypoints[8][1])
-                    c_ring = (0, 255, 180) if state in ("LEFT_DOWN", "DRAG") else (255, 180, 0)
+                    c_ring = (153, 211, 52) if state in ("LEFT_DOWN", "DRAG") else (248, 189, 56)
                     cv2.circle(annotated, (ix, iy), 12, c_ring, 2, cv2.LINE_AA)
                 else:
                     self.air_mouse.release()
-                    self.lbl_current_symbol.setText("Air Mouse: Đang tắt")
+                    self._set_hero_tone("idle")
+                    self.lbl_current_symbol.setText("Air Mouse: đang tắt")
+                    self.lbl_mouse_state.setText("Trạng thái: Chưa kích hoạt")
+                    theme.set_tone(self.lbl_mouse_state, "idle")
                     self.progress_hold.setValue(0)
 
             elif self.current_mode == self.MODE_PRESENTATION:
@@ -887,21 +1011,26 @@ class SignAndGestureApp(QMainWindow):
                     self._slide_banner_text = str(slide_ev)
                     self._slide_banner_until = time.perf_counter() + 1.0
                     self.lbl_slide_event.setText(f"Lệnh slide gần nhất: {slide_ev}")
+                    theme.set_tone(self.lbl_slide_event, "ok")
                     self.laser_overlay.show_banner(str(slide_ev))
 
                 if self.chk_laser.isChecked() and laser_pt is not None:
                     self.laser_overlay.set_point(laser_pt)
                     ix, iy = int(primary.keypoints[8][0]), int(primary.keypoints[8][1])
-                    cv2.circle(annotated, (ix, iy), 14, (40, 40, 255), 3, cv2.LINE_AA)
+                    cv2.circle(annotated, (ix, iy), 14, (68, 68, 248), 3, cv2.LINE_AA)
                     cv2.circle(annotated, (ix, iy), 5, (255, 255, 255), -1, cv2.LINE_AA)
-                    self.lbl_current_symbol.setText("LASER POINTER: BẬT")
-                    self.lbl_present_state.setText("Trạng thái: Đang chiếu tia Laser đỏ")
+                    self._set_hero_tone("active")
+                    self.lbl_current_symbol.setText("Tia laser: đang bật")
+                    self.lbl_present_state.setText("Trạng thái: Đang chiếu tia laser đỏ")
+                    theme.set_tone(self.lbl_present_state, "active")
                     self.progress_hold.setValue(100)
                 else:
                     self.laser_overlay.set_point(None)
                     if time.perf_counter() < self._slide_banner_until:
+                        self._set_hero_tone("ok")
                         self.lbl_current_symbol.setText(self._slide_banner_text)
                         self.lbl_present_state.setText(f"Đã thực thi: {self._slide_banner_text}")
+                        theme.set_tone(self.lbl_present_state, "ok")
                         self.progress_hold.setValue(100)
                         hud_txt = "NEXT SLIDE >>" if "tiếp" in self._slide_banner_text else "<< PREV SLIDE"
                         cv2.putText(
@@ -910,17 +1039,21 @@ class SignAndGestureApp(QMainWindow):
                             (16, 36),
                             cv2.FONT_HERSHEY_SIMPLEX,
                             0.85,
-                            (56, 189, 248),
+                            (248, 189, 56),
                             2,
                             cv2.LINE_AA,
                         )
                     elif p_state == "SWIPE_READY":
-                        self.lbl_current_symbol.setText("THUYẾT TRÌNH: SẴN SÀNG VẪY")
-                        self.lbl_present_state.setText("Trạng thái: Đang xòe tay - vẫy Trái/Phải để chuyển slide")
+                        self._set_hero_tone("active")
+                        self.lbl_current_symbol.setText("Sẵn sàng vẫy chuyển slide")
+                        self.lbl_present_state.setText("Trạng thái: Đang xòe tay — vẫy trái/phải để lật slide")
+                        theme.set_tone(self.lbl_present_state, "active")
                         self.progress_hold.setValue(int(swipe_prog * 100))
                     else:
-                        self.lbl_current_symbol.setText(f"THUYẾT TRÌNH: {p_state}")
+                        self._set_hero_tone("idle")
+                        self.lbl_current_symbol.setText(f"Thuyết trình: {p_state}")
                         self.lbl_present_state.setText(f"Trạng thái: {p_state}")
+                        theme.set_tone(self.lbl_present_state, "idle")
                         self.progress_hold.setValue(0)
         else:
             self.voting_buffer.update(None, 0.0)
@@ -932,16 +1065,27 @@ class SignAndGestureApp(QMainWindow):
             self.laser_overlay.set_point(None)
             self.chart_kpt.push([None, None])
             if self.current_mode == self.MODE_PRESENTATION and time.perf_counter() < self._slide_banner_until:
+                self._set_hero_tone("ok")
                 self.lbl_current_symbol.setText(self._slide_banner_text)
                 self.lbl_present_state.setText(f"Đã thực thi: {self._slide_banner_text}")
+                theme.set_tone(self.lbl_present_state, "ok")
                 self.progress_hold.setValue(100)
             else:
-                self.lbl_current_symbol.setText("Đang chờ bàn tay...")
+                self._set_hero_tone("idle")
+                self.lbl_current_symbol.setText("Đang chờ bàn tay…")
                 self.progress_hold.setValue(0)
-                self.lbl_present_state.setText("Trạng thái: Đang chờ bàn tay...")
+                self.lbl_present_state.setText("Trạng thái: Đang chờ bàn tay…")
+                theme.set_tone(self.lbl_present_state, "idle")
             self.progress_pinch_left.setValue(0)
-            self.lbl_mouse_state.setText("Trạng thái: Đang chờ bàn tay (Con trỏ nghỉ)")
-            self.lbl_fingers_debug.setText("Trạng thái 5 ngón [Cái, Trỏ, Giữa, Áp, Út]: [-, -, -, -, -]")
+            if self.chk_air_mouse.isChecked():
+                self.lbl_mouse_state.setText("Trạng thái: Đang chờ bàn tay (con trỏ nghỉ)")
+            else:
+                self.lbl_mouse_state.setText("Trạng thái: Chưa kích hoạt")
+            theme.set_tone(self.lbl_mouse_state, "idle")
+            self.lbl_fingers_debug.setText("5 ngón [Cái, Trỏ, Giữa, Áp, Út]: [-, -, -, -, -]")
+
+        if self.current_mode == self.MODE_ASL:
+            self._draw_asl_caption_bar(annotated, self.txt_sentence.text())
 
         # Chuyển frame BGR sang QPixmap hiển thị lên giao diện
         rgb = cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
@@ -962,9 +1106,13 @@ class SignAndGestureApp(QMainWindow):
             vol_pct = self.media_ctrl.set_volume_percent(int(round(rollback * 100)))
             self.progress_volume.setValue(vol_pct)
             self.lbl_last_command.setText(f"Lệnh gần nhất: Giữ âm lượng {vol_pct}% (đã bỏ qua động tác rút tay)")
+            theme.set_tone(self.lbl_last_command, "ok")
 
     def _on_sentence_edited(self, text: str) -> None:
         self.translator.text_buffer = text
+        if hasattr(self, "lbl_char_count"):
+            self.lbl_char_count.setText(f"{len(text)} ký tự")
+            theme.set_tone(self.lbl_char_count, "info" if text else "neutral")
         self._refresh_suggestion_buttons()
 
     def _refresh_suggestion_buttons(self) -> None:
@@ -1021,21 +1169,18 @@ class SignAndGestureApp(QMainWindow):
 
         label = self.combo_calib_letter.currentText()
         kpts = self.last_analyses[0].keypoints
-        feat = HandPoseAnalyzer.extract_normalized_features(kpts)
 
-        os.makedirs("models", exist_ok=True)
-        db_path = self.detector.analyzer.custom_keypoints_db_path
-
-        if self.detector.analyzer.sample_features is not None and len(self.detector.analyzer.sample_features) > 0:
-            new_feats = np.vstack([self.detector.analyzer.sample_features, feat])
-            new_labels = np.append(self.detector.analyzer.sample_labels, label)
-        else:
-            new_feats = np.array([feat], dtype=np.float32)
-            new_labels = np.array([label])
-
-        np.savez_compressed(db_path, features=new_feats, labels=new_labels)
-        self.detector.analyzer.reload_custom_samples()
-        count = int(np.sum(new_labels == label))
+        db_path = resolve_project_path(self.detector.analyzer.custom_keypoints_db_path)
+        self.detector.analyzer.custom_keypoints_db_path = db_path
+        try:
+            count = self.detector.analyzer.save_custom_sample(kpts, label)
+        except (ValueError, OSError) as exc:
+            QMessageBox.warning(
+                self,
+                "Không thể lưu mẫu 21-Keypoints",
+                f"Dữ liệu khung xương hiện tại không hợp lệ hoặc không thể ghi DB cho '{label}': {exc}",
+            )
+            return
         QMessageBox.information(
             self,
             "Đã lưu mẫu 21-Keypoints",

@@ -1,14 +1,14 @@
-from typing import Dict, List, Tuple
+from typing import Dict
 import cv2
 import numpy as np
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QFont, QImage, QPixmap
+from PyQt6.QtGui import QImage, QKeyEvent, QPixmap
 from PyQt6.QtWidgets import (
+    QButtonGroup,
     QDialog,
     QFrame,
     QGridLayout,
     QHBoxLayout,
-    QLabel,
     QPushButton,
     QScrollArea,
     QVBoxLayout,
@@ -16,6 +16,8 @@ from PyQt6.QtWidgets import (
 )
 
 from src.core.pose_analyzer import HAND_SKELETON_CONNECTIONS
+from src.ui import theme
+from src.ui.theme import T
 
 
 # Bảng hướng dẫn chi tiết cách đặt ngón tay cho toàn bộ 26 chữ cái A-Z + SPACE + DEL
@@ -197,7 +199,8 @@ def render_pose_illustration(pose_type: str, label: str, width: int = 240, heigh
     Vẽ hình minh họa trực quan 21 khớp xương bàn tay cho từng chữ cái ASL lên ảnh BGR.
     Giúp người dùng nhìn vào là biết ngay ngón nào cần mở (chấm vàng trên đỉnh), ngón nào cần gập.
     """
-    canvas = np.full((height, width, 3), (15, 23, 42), dtype=np.uint8)
+    # Nền BGR khớp T.INSET (#0a101c -> BGR 28, 16, 10)
+    canvas = np.full((height, width, 3), (28, 16, 10), dtype=np.uint8)
     cx, cy = width // 2, int(height * 0.78)
 
     # Khởi tạo gốc cổ tay (0) và 4 khớp MCP (5, 9, 13, 17)
@@ -330,8 +333,8 @@ def render_pose_illustration(pose_type: str, label: str, width: int = 240, heigh
         f"Ky hieu: {label}",
         (12, 26),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.65,
-        (56, 189, 248),
+        0.62,
+        (248, 189, 56),
         2,
         cv2.LINE_AA,
     )
@@ -346,107 +349,126 @@ class ASLGuideDialog(QDialog):
 
     def __init__(self, parent: QWidget = None):
         super().__init__(parent)
-        self.setWindowTitle("Hướng dẫn Cử chỉ Bảng chữ cái Ngôn ngữ Ký hiệu ASL (A-Z)")
-        self.resize(860, 620)
-        self.setStyleSheet(
-            """
-            QDialog { background-color: #0f172a; color: #f8fafc; font-family: 'Segoe UI', sans-serif; }
-            QLabel { color: #e2e8f0; }
-            QPushButton {
-                background-color: #1e293b; color: #f8fafc; border: 1px solid #334155;
-                border-radius: 6px; padding: 8px; font-weight: bold; font-size: 13px;
-            }
-            QPushButton:hover { background-color: #2563eb; border-color: #60a5fa; }
-            """
-        )
+        self.setWindowTitle("Hướng dẫn cử chỉ bảng chữ cái ASL (A–Z)")
+        self.setMinimumSize(780, 560)
+        self.resize(920, 660)
+        self.setStyleSheet(theme.build_stylesheet())
 
         root = QHBoxLayout(self)
-        root.setContentsMargins(14, 14, 14, 14)
-        root.setSpacing(14)
+        root.setContentsMargins(T.SP_4, T.SP_4, T.SP_4, T.SP_4)
+        root.setSpacing(T.SP_4)
 
-        # Cột trái: Lưới các nút chữ cái A-Z, SPACE, DEL + danh sách tóm tắt
-        left_widget = QWidget()
-        left_layout = QVBoxLayout(left_widget)
-        left_layout.setContentsMargins(0, 0, 0, 0)
-
-        lbl_pick = QLabel("BẤM VÀO CHỮ CÁI ĐỂ XEM HÌNH MINH HỌA 21 KHỚP:")
-        lbl_pick.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
-        lbl_pick.setStyleSheet("color: #38bdf8;")
-        left_layout.addWidget(lbl_pick)
+        # Cột trái: Lưới phím A–Z, SPACE, DEL + bảng tra cứu nhanh
+        left_card, left_layout = theme.card(spacing=T.SP_3)
+        left_layout.addLayout(
+            theme.panel_header(
+                "Bảng chữ cái ASL (A–Z)",
+                "Bấm phím chữ cái (hoặc gõ trực tiếp trên bàn phím) để xem sơ đồ 21 khớp.",
+            )
+        )
 
         grid = QGridLayout()
-        grid.setSpacing(6)
-        keys = list(ASL_GESTURE_GUIDE.keys())
-        for idx, k in enumerate(keys):
-            btn = QPushButton(k)
-            btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.clicked.connect(lambda checked=False, letter=k: self.show_letter(letter))
+        grid.setSpacing(T.SP_2)
+        self._key_group = QButtonGroup(self)
+        self._key_group.setExclusive(True)
+        self._key_buttons: Dict[str, QPushButton] = {}
+        for idx, k in enumerate(ASL_GESTURE_GUIDE.keys()):
+            btn = theme.button(
+                k,
+                role="key",
+                checkable=True,
+                tooltip=f"Xem hướng dẫn ký hiệu {k}",
+                on_click=lambda letter=k: self.show_letter(letter),
+            )
+            btn.setAccessibleName(f"Ký hiệu {k}")
+            btn.setAutoDefault(False)
+            self._key_group.addButton(btn)
+            self._key_buttons[k] = btn
             grid.addWidget(btn, idx // 7, idx % 7)
         left_layout.addLayout(grid)
 
-        # Bảng danh sách tra cứu nhanh cuộn được
+        # Danh sách tra cứu nhanh cuộn được
+        list_inset, list_inset_layout = theme.inset(spacing=T.SP_1, margins=(12, 10, 4, 10))
+        list_inset_layout.addWidget(theme.caption("Tra nhanh [Cái, Trỏ, Giữa, Áp, Út] · 1 = mở, 0 = gập"))
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        scroll.setStyleSheet("QScrollArea { border: 1px solid #334155; border-radius: 8px; background-color: #1e293b; }")
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
         list_container = QWidget()
-        list_container.setStyleSheet("background-color: #1e293b;")
         list_layout = QVBoxLayout(list_container)
-        list_layout.setSpacing(6)
+        list_layout.setContentsMargins(0, 0, T.SP_2, 0)
+        list_layout.setSpacing(T.SP_1)
 
         for k, meta in ASL_GESTURE_GUIDE.items():
-            row_lbl = QLabel(
-                f"<b style='color:#38bdf8; font-size:13px;'>{k}</b> "
-                f"<span style='color:#10b981; font-family:Consolas;'>{meta['fingers']}</span> : "
-                f"<span style='color:#e2e8f0;'>{meta['short']}</span>"
+            row_lbl = theme.label(
+                f"<b style='color:{T.ACCENT};'>{k}</b>&nbsp;&nbsp;"
+                f"<span style='color:{T.SUCCESS}; font-family:Consolas;'>{meta['fingers']}</span>&nbsp;&nbsp;"
+                f"<span style='color:{T.TEXT};'>{meta['short']}</span>",
+                role="guide-row",
+                wrap=True,
             )
-            row_lbl.setWordWrap(True)
-            row_lbl.setStyleSheet("padding: 4px 6px; border-bottom: 1px solid #334155;")
             list_layout.addWidget(row_lbl)
+        list_layout.addStretch()
 
         scroll.setWidget(list_container)
-        left_layout.addWidget(scroll, stretch=1)
-        root.addWidget(left_widget, stretch=3)
+        list_inset_layout.addWidget(scroll, stretch=1)
+        left_layout.addWidget(list_inset, stretch=1)
+        root.addWidget(left_card, stretch=3)
 
-        # Cột phải: Khung hiển thị Sơ đồ 21 khớp + Hướng dẫn chi tiết từng ngón
-        right_card = QFrame()
-        right_card.setStyleSheet("background-color: #1e293b; border: 1px solid #334155; border-radius: 10px; padding: 12px;")
-        right_layout = QVBoxLayout(right_card)
+        # Cột phải: Sơ đồ 21 khớp + hướng dẫn chi tiết từng ngón
+        right_card, right_layout = theme.card(spacing=T.SP_3)
+        right_layout.addWidget(theme.caption("Chi tiết ký hiệu"))
 
-        self.lbl_letter_title = QLabel("Ký hiệu: A")
-        self.lbl_letter_title.setFont(QFont("Segoe UI", 18, QFont.Weight.Bold))
-        self.lbl_letter_title.setStyleSheet("color: #10b981;")
+        self.lbl_letter_title = theme.label("Ký hiệu: A", role="hero", tone="active")
         self.lbl_letter_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         right_layout.addWidget(self.lbl_letter_title)
 
-        self.lbl_diagram = QLabel()
-        self.lbl_diagram.setFixedSize(250, 250)
+        self.lbl_diagram = theme.label("", role="diagram")
+        self.lbl_diagram.setFixedSize(256, 256)
         self.lbl_diagram.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.lbl_diagram.setStyleSheet("background-color: #0f172a; border: 1px solid #475569; border-radius: 8px;")
+        self.lbl_diagram.setAccessibleName("Sơ đồ 21 điểm khớp minh họa")
         right_layout.addWidget(self.lbl_diagram, alignment=Qt.AlignmentFlag.AlignCenter)
 
-        self.lbl_fingers_code = QLabel()
-        self.lbl_fingers_code.setFont(QFont("Consolas", 11, QFont.Weight.Bold))
-        self.lbl_fingers_code.setStyleSheet("color: #f59e0b; padding: 4px;")
-        self.lbl_fingers_code.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        right_layout.addWidget(self.lbl_fingers_code)
+        self.lbl_fingers_code = theme.pill("[Cái, Trỏ, Giữa, Áp, Út] = [1, 0, 0, 0, 0]", "info")
+        self.lbl_fingers_code.setAccessibleName("Mã trạng thái 5 ngón")
+        right_layout.addWidget(self.lbl_fingers_code, alignment=Qt.AlignmentFlag.AlignCenter)
 
-        self.lbl_detail_text = QLabel()
-        self.lbl_detail_text.setWordWrap(True)
-        self.lbl_detail_text.setStyleSheet(
-            "background-color: #0f172a; color: #f8fafc; padding: 12px; border-radius: 8px; font-size: 13px; line-height: 1.5;"
-        )
+        self.lbl_detail_text = theme.label("", role="detail", wrap=True)
+        self.lbl_detail_text.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
         right_layout.addWidget(self.lbl_detail_text, stretch=1)
 
-        btn_close = QPushButton("Đóng bảng hướng dẫn")
-        btn_close.setStyleSheet("background-color: #2563eb; color: white; padding: 10px;")
-        btn_close.clicked.connect(self.accept)
+        btn_close = theme.button(
+            "Đóng bảng hướng dẫn",
+            variant="primary",
+            tooltip="Đóng cửa sổ (Esc)",
+            on_click=self.accept,
+        )
         right_layout.addWidget(btn_close)
 
         root.addWidget(right_card, stretch=2)
         self.show_letter("A")
 
+    def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802 (Qt API)
+        key = event.key()
+        if Qt.Key.Key_A <= key <= Qt.Key.Key_Z:
+            self.show_letter(chr(key))
+            return
+        if key == Qt.Key.Key_Space:
+            self.show_letter("SPACE")
+            return
+        if key in (Qt.Key.Key_Backspace, Qt.Key.Key_Delete):
+            self.show_letter("DEL")
+            return
+        super().keyPressEvent(event)
+
     def show_letter(self, letter: str) -> None:
         meta = ASL_GESTURE_GUIDE.get(letter, ASL_GESTURE_GUIDE["A"])
+        if letter in self._key_buttons:
+            btn = self._key_buttons[letter]
+            btn.blockSignals(True)
+            btn.setChecked(True)
+            btn.blockSignals(False)
+            btn.setFocus()
+
         self.lbl_letter_title.setText(f"Ký hiệu: {letter}")
         self.lbl_fingers_code.setText(f"[Cái, Trỏ, Giữa, Áp, Út] = {meta['fingers']}")
         self.lbl_detail_text.setText(f"{meta['short']}\n\n{meta['detail']}")
