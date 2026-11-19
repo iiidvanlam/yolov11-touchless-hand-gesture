@@ -4,9 +4,13 @@ theo đúng phong cách đồ họa khoa học của mẫu báo cáo Trường �
 """
 
 import csv
+import os
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
+
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+REPORT_ASSETS_DIR = os.path.join(PROJECT_ROOT, "report_assets")
 
 plt.rcParams['font.sans-serif'] = 'DejaVu Sans'
 plt.rcParams['axes.unicode_minus'] = False
@@ -85,7 +89,8 @@ def gen_fig_2_1_layered_arch():
         ax.text(x + w/2, y + h/2, txt, ha='center', va='center', fontsize=8, color='#0f172a')
 
     plt.tight_layout()
-    plt.savefig('report_assets/fig_2_1_layered_arch.png', dpi=300, bbox_inches='tight')
+    os.makedirs(REPORT_ASSETS_DIR, exist_ok=True)
+    plt.savefig(os.path.join(REPORT_ASSETS_DIR, 'fig_2_1_layered_arch.png'), dpi=300, bbox_inches='tight')
     plt.close()
 
 
@@ -129,7 +134,8 @@ def gen_fig_2_2_dataflow():
     ax.text(3.32, 0.72, 'Frame HUD + Sự kiện\nÂm lượng / Phát âm TTS', ha='center', va='center', fontsize=7.5, fontweight='bold', color='#b91c1c')
 
     plt.tight_layout()
-    plt.savefig('report_assets/fig_2_2_dataflow.png', dpi=300, bbox_inches='tight')
+    os.makedirs(REPORT_ASSETS_DIR, exist_ok=True)
+    plt.savefig(os.path.join(REPORT_ASSETS_DIR, 'fig_2_2_dataflow.png'), dpi=300, bbox_inches='tight')
     plt.close()
 
 
@@ -193,7 +199,8 @@ def gen_fig_3_1_hybrid_fusion():
             ha='center', va='center', fontsize=8, fontweight='bold', color='#dc2626')
 
     plt.tight_layout()
-    plt.savefig('report_assets/fig_3_1_hybrid_fusion.png', dpi=300, bbox_inches='tight')
+    os.makedirs(REPORT_ASSETS_DIR, exist_ok=True)
+    plt.savefig(os.path.join(REPORT_ASSETS_DIR, 'fig_3_1_hybrid_fusion.png'), dpi=300, bbox_inches='tight')
     plt.close()
 
 
@@ -239,7 +246,8 @@ def gen_fig_3_2_pipeline_5steps():
                         arrowprops=dict(arrowstyle='->', lw=1.8, color='#475569'))
 
     plt.tight_layout()
-    plt.savefig('report_assets/fig_3_2_pipeline_5steps.png', dpi=300, bbox_inches='tight')
+    os.makedirs(REPORT_ASSETS_DIR, exist_ok=True)
+    plt.savefig(os.path.join(REPORT_ASSETS_DIR, 'fig_3_2_pipeline_5steps.png'), dpi=300, bbox_inches='tight')
     plt.close()
 
 
@@ -297,7 +305,8 @@ def gen_fig_4_2_jitter_comparison():
     ax.grid(True, linestyle='--', alpha=0.5)
 
     plt.tight_layout()
-    plt.savefig('report_assets/fig_4_2_jitter_comparison.png', dpi=300, bbox_inches='tight')
+    os.makedirs(REPORT_ASSETS_DIR, exist_ok=True)
+    plt.savefig(os.path.join(REPORT_ASSETS_DIR, 'fig_4_2_jitter_comparison.png'), dpi=300, bbox_inches='tight')
     plt.close()
 
 

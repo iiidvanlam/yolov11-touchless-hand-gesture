@@ -37,8 +37,10 @@ def map_to_region(
 ) -> Tuple[float, float]:
     """Ánh xạ tọa độ pixel trong khung hình sang tọa độ chuẩn hóa 0..1 của màn hình."""
     x1, y1, x2, y2 = region
-    nx = (px / max(frame_w, 1) - x1) / (x2 - x1)
-    ny = (py / max(frame_h, 1) - y1) / (y2 - y1)
+    w_reg = max(x2 - x1, 1e-6)
+    h_reg = max(y2 - y1, 1e-6)
+    nx = (px / max(frame_w, 1) - x1) / w_reg
+    ny = (py / max(frame_h, 1) - y1) / h_reg
     return float(np.clip(nx, 0.0, 1.0)), float(np.clip(ny, 0.0, 1.0))
 
 
@@ -105,7 +107,7 @@ class AirMouseController:
         r_right = _dist(kpts[4], kpts[12]) / palm
         # "Ly hợp": ngón trỏ gập vào lòng bàn tay (và không đang chụm kéo chuột) => tạm dừng con trỏ
         index_folded = (fingers is not None and len(fingers) >= 2 and fingers[1] == 0 and r_left > self.PINCH_OFF)
-        clutch = index_folded or (_dist(kpts[8], kpts[0]) < 1.18 * _dist(kpts[5], kpts[0]))
+        clutch = index_folded or (r_left > self.PINCH_OFF and _dist(kpts[8], kpts[0]) < 1.18 * _dist(kpts[5], kpts[0]))
 
         event = ""
         nx, ny = map_to_region(kpts[8][0], kpts[8][1], frame_w, frame_h, self.region)

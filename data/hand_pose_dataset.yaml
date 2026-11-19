@@ -4,7 +4,7 @@
 path: ../datasets/hand-keypoints
 train: images/train
 val: images/val
-test: images/test
+# test: images/test  # Lưu ý: tập dữ liệu hand-keypoints cục bộ hiện chỉ có splits train và val
 
 # 21 điểm khớp xương, mỗi điểm gồm (x, y, visibility)
 kpt_shape: [21, 3]

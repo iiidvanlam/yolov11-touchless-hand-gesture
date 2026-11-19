@@ -12,6 +12,8 @@ from docx.enum.table import WD_TABLE_ALIGNMENT, WD_ALIGN_VERTICAL
 from docx.oxml import OxmlElement, parse_xml
 from docx.oxml.ns import nsdecls, qn
 
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
 
 def create_report():
     doc = docx.Document()
@@ -167,13 +169,14 @@ def create_report():
         return p
 
     def add_figure(img_path, fig_num_str, fig_caption, source_text="Tác giả thiết kế và tổng hợp, 2026", width_in=5.7):
-        if os.path.exists(img_path):
+        resolved_img = img_path if os.path.isabs(img_path) else os.path.join(PROJECT_ROOT, img_path)
+        if os.path.exists(resolved_img):
             p_img = doc.add_paragraph()
             p_img.alignment = WD_ALIGN_PARAGRAPH.CENTER
             p_img.paragraph_format.first_line_indent = Cm(0)
             p_img.paragraph_format.space_before = Pt(10)
             p_img.paragraph_format.space_after = Pt(4)
-            p_img.add_run().add_picture(img_path, width=Inches(width_in))
+            p_img.add_run().add_picture(resolved_img, width=Inches(width_in))
 
         p_cap = doc.add_paragraph()
         p_cap.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -286,7 +289,7 @@ def create_report():
     add_p("TRƯỜNG ĐẠI HỌC NAM CẦN THƠ", bold=False, size=14, align=WD_ALIGN_PARAGRAPH.CENTER, first_indent=0, space_before=6, space_after=2)
     add_p("KHOA CÔNG NGHỆ THÔNG TIN", bold=True, size=14, align=WD_ALIGN_PARAGRAPH.CENTER, first_indent=0, space_before=0, space_after=14)
 
-    logo_path = "report_assets/dnc_logo.png"
+    logo_path = os.path.join(PROJECT_ROOT, "report_assets", "dnc_logo.png")
     if os.path.exists(logo_path):
         p_logo = doc.add_paragraph()
         p_logo.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -880,7 +883,7 @@ def create_report():
         r.font.name = 'Consolas'
         r.font.size = Pt(10)
 
-    output_path = "BaoCao_KhoaLuan_NhanDienCuChiTay_YOLOv11.docx"
+    output_path = os.path.join(PROJECT_ROOT, "BaoCao_KhoaLuan_NhanDienCuChiTay_YOLOv11.docx")
     doc.save(output_path)
     print(f"BÁO CÁO CHUYÊN SÂU ĐÃ ĐƯỢC TẠO THÀNH CÔNG TẠI: {output_path}")
 

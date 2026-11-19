@@ -3,18 +3,25 @@ ultralytics>=8.3.0
 mediapipe>=0.10.0
 opencv-python>=4.10.0
 numpy>=1.26.0
+
+# Optional ONNX Export & Inference
+onnx>=1.16.0
 onnxruntime>=1.19.0
+onnxslim>=0.1.82
 
 # Desktop GUI (PyQt6 Modern Dark UI)
 PyQt6>=6.6.0
 Pillow>=10.4.0
 
-# Windows Touchless Control (Audio, Media Keys, Brightness)
+# Windows Touchless Control (Audio, Screenshot, COM)
 pycaw>=20240210
 comtypes>=1.4.0
-pynput>=1.7.7
-pyautogui>=0.9.54
-screen-brightness-control>=0.23.0
+mss>=10.0.0
+pywin32>=306
 
-# Text-to-Speech (Sign Language A-Z Reader)
+# Text-to-Speech Fallback (Sign Language A-Z Reader)
 pyttsx3>=2.90
+
+# Report & Diagram Generation Scripts (scripts/)
+matplotlib>=3.8.0
+python-docx>=1.1.0

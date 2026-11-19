@@ -104,9 +104,11 @@ class SignLanguageTranslator:
                 import win32com.client
 
                 pythoncom.CoInitialize()
-                speaker = win32com.client.Dispatch("SAPI.SpVoice")
-                speaker.Speak(text)
-                pythoncom.CoUninitialize()
+                try:
+                    speaker = win32com.client.Dispatch("SAPI.SpVoice")
+                    speaker.Speak(text)
+                finally:
+                    pythoncom.CoUninitialize()
                 return
             except Exception:
                 pass

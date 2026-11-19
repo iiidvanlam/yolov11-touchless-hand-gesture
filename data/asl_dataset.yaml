@@ -1,5 +1,7 @@
 # Cấu hình Dataset YOLOv8/YOLOv11 cho Nhận diện Bảng chữ cái Ngôn ngữ Ký hiệu (ASL A-Z)
-path: ../datasets/asl_alphabet  # Thư mục gốc chứa dữ liệu
+# [Reference-only template]: Thư mục ../datasets/asl_alphabet không có sẵn cục bộ;
+# ứng dụng hiện dùng YOLOv11-Pose 21 keypoints kết hợp giải tích hình học + asl_keypoints_db.npz.
+path: ../datasets/asl_alphabet  # Thư mục gốc chứa dữ liệu (chỉ mang tính tham khảo)
 train: images/train
 val: images/val
 test: images/test

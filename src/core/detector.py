@@ -1,10 +1,18 @@
 from concurrent.futures import ThreadPoolExecutor
+import importlib.util
 import math
 import os
+import time
 from typing import List, Optional, Tuple
 import cv2
 import numpy as np
 
+from src.core.paths import (
+    DEFAULT_GESTURE_TASK_PATH,
+    DEFAULT_YOLO_MODEL_PATH,
+    PROJECT_ROOT,
+    resolve_project_path,
+)
 from src.core.pose_analyzer import (
     HAND_SKELETON_CONNECTIONS,
     HandPoseAnalysis,
@@ -31,11 +39,11 @@ class YoloPoseHandDetector:
 
     def __init__(
         self,
-        model_path: str = "models/yolo11n_hand_pose_best.pt",
+        model_path: str = DEFAULT_YOLO_MODEL_PATH,
         conf_threshold: float = 0.55,
         iou_threshold: float = 0.45,
         use_gpu: bool = True,
-        gesture_task_path: str = "models/gesture_recognizer.task",
+        gesture_task_path: str = DEFAULT_GESTURE_TASK_PATH,
     ):
         self.model_path = model_path
         self.conf_threshold = conf_threshold
@@ -52,6 +60,8 @@ class YoloPoseHandDetector:
         self.last_raw_kpts: Optional[np.ndarray] = None
         self._prev_bbox: Optional[Tuple[int, int, int, int]] = None
         self._pool = ThreadPoolExecutor(max_workers=2)
+        self._last_yolo_warn_t: float = 0.0
+        self._last_mp_warn_t: float = 0.0
 
         self._init_mediapipe_refiner()
         self.load_model(model_path)
@@ -61,13 +71,18 @@ class YoloPoseHandDetector:
 
     def _init_mediapipe_refiner(self) -> None:
         """Khởi tạo bộ tinh chỉnh 21 khớp 3D & GestureRecognizer sub-pixel."""
-        if not os.path.exists(self.gesture_task_path):
+        task_path = self.gesture_task_path
+        if not os.path.exists(task_path) and task_path and not os.path.isabs(task_path):
+            candidate = resolve_project_path(task_path)
+            if os.path.exists(candidate):
+                task_path = candidate
+        if not task_path or not os.path.exists(task_path):
             return
         try:
             from mediapipe.tasks import python as mp_python
             from mediapipe.tasks.python import vision as mp_vision
 
-            base_opts = mp_python.BaseOptions(model_asset_path=self.gesture_task_path)
+            base_opts = mp_python.BaseOptions(model_asset_path=task_path)
             opts = mp_vision.GestureRecognizerOptions(
                 base_options=base_opts,
                 num_hands=1,
@@ -99,15 +114,31 @@ class YoloPoseHandDetector:
 
         self.device = self._resolve_device()
 
+        resolved_requested = self.model_path
+        if resolved_requested and not os.path.exists(resolved_requested) and not os.path.isabs(resolved_requested):
+            candidate_rel = resolve_project_path(resolved_requested)
+            if os.path.exists(candidate_rel):
+                resolved_requested = candidate_rel
+
+        if resolved_requested and resolved_requested.lower().endswith(".onnx"):
+            if importlib.util.find_spec("onnxruntime") is None:
+                print(
+                    f"[Cảnh báo] Thiếu thư viện 'onnxruntime' để nạp model ONNX ({resolved_requested}). "
+                    "Vui lòng cài đặt 'onnxruntime' hoặc chọn file trọng số '.pt'."
+                )
+                self.model = None
+                self.model_loaded_name = "Thiếu onnxruntime (.onnx)"
+                return False
+
         try:
             from ultralytics import YOLO
 
             candidates = [
-                self.model_path,
-                "models/yolo11n_hand_pose_best.pt",
-                "runs/pose/runs/pose/yolo11_hand_pose_rtx4050/weights/best.pt",
-                "runs/pose/yolo11n_hand_pose_gpu/weights/best.pt",
-                "yolo11n-pose.pt",
+                resolved_requested,
+                DEFAULT_YOLO_MODEL_PATH,
+                os.path.join(PROJECT_ROOT, "runs", "pose", "runs", "pose", "yolo11_hand_pose_rtx4050", "weights", "best.pt"),
+                os.path.join(PROJECT_ROOT, "runs", "pose", "yolo11n_hand_pose_refine", "weights", "best.pt"),
+                os.path.join(PROJECT_ROOT, "yolo11n-pose.pt"),
             ]
             selected = None
             for path in candidates:
@@ -120,7 +151,17 @@ class YoloPoseHandDetector:
 
             self.model = YOLO(selected)
             tag_mp = " + MP3D + 1€" if self.mp_recognizer is not None else ""
-            self.model_loaded_name = f"{os.path.basename(selected)} ({self.device.upper()}{tag_mp})"
+            kpt_shape = getattr(getattr(self.model, "model", None), "kpt_shape", None)
+            if kpt_shape is not None and len(kpt_shape) >= 1 and int(kpt_shape[0]) < 21:
+                print(
+                    f"[Cảnh báo] Model '{os.path.basename(selected)}' chỉ có {int(kpt_shape[0])} keypoints "
+                    "(COCO person), không đủ 21 keypoints bàn tay! Vui lòng dùng 'models/yolo11n_hand_pose_best.pt'."
+                )
+                self.model_loaded_name = (
+                    f"{os.path.basename(selected)} [CẢNH BÁO {int(kpt_shape[0])}-kpt!] ({self.device.upper()}{tag_mp})"
+                )
+            else:
+                self.model_loaded_name = f"{os.path.basename(selected)} ({self.device.upper()}{tag_mp})"
             return True
         except Exception as exc:
             print(f"[Cảnh báo] Không thể tải YOLOv11-Pose ({exc}).")
@@ -170,60 +211,66 @@ class YoloPoseHandDetector:
         if self.mp_recognizer is None:
             return None, None, None, 0.0
 
-        import mediapipe as mp
+        try:
+            import mediapipe as mp
 
-        h_full, w_full = rgb_full.shape[:2]
-        if bbox is not None:
-            x1, y1, x2, y2 = bbox
-            bw, bh = x2 - x1, y2 - y1
-            pad = int(max(bw, bh) * 0.50)
-            cx1 = max(0, x1 - pad)
-            cy1 = max(0, y1 - pad)
-            cx2 = min(w_full, x2 + pad)
-            cy2 = min(h_full, y2 + pad)
-            if (cx2 - cx1) >= 64 and (cy2 - cy1) >= 64:
-                roi_rgb = np.ascontiguousarray(rgb_full[cy1:cy2, cx1:cx2])
-                res = self.mp_recognizer.recognize(mp.Image(image_format=mp.ImageFormat.SRGB, data=roi_rgb))
-                if res.hand_landmarks and len(res.hand_landmarks) > 0:
-                    lms = res.hand_landmarks[0]
-                    rw, rh = cx2 - cx1, cy2 - cy1
-                    kpts = np.array(
-                        [[cx1 + lm.x * rw, cy1 + lm.y * rh, 0.98] for lm in lms],
-                        dtype=np.float32,
-                    )
-                    neural_name = None
-                    neural_score = 0.0
-                    if res.gestures and len(res.gestures) > 0 and len(res.gestures[0]) > 0:
-                        neural_name = res.gestures[0][0].category_name
-                        neural_score = float(res.gestures[0][0].score)
-                    tight_box = (
-                        max(0, int(np.min(kpts[:, 0]) - 18)),
-                        max(0, int(np.min(kpts[:, 1]) - 18)),
-                        min(w_full, int(np.max(kpts[:, 0]) + 18)),
-                        min(h_full, int(np.max(kpts[:, 1]) + 18)),
-                    )
-                    return kpts, tight_box, neural_name, neural_score
-            return None, None, None, 0.0
+            h_full, w_full = rgb_full.shape[:2]
+            if bbox is not None:
+                x1, y1, x2, y2 = bbox
+                bw, bh = x2 - x1, y2 - y1
+                pad = int(max(bw, bh) * 0.50)
+                cx1 = max(0, x1 - pad)
+                cy1 = max(0, y1 - pad)
+                cx2 = min(w_full, x2 + pad)
+                cy2 = min(h_full, y2 + pad)
+                if (cx2 - cx1) >= 64 and (cy2 - cy1) >= 64:
+                    roi_rgb = np.ascontiguousarray(rgb_full[cy1:cy2, cx1:cx2])
+                    res = self.mp_recognizer.recognize(mp.Image(image_format=mp.ImageFormat.SRGB, data=roi_rgb))
+                    if res.hand_landmarks and len(res.hand_landmarks) > 0:
+                        lms = res.hand_landmarks[0]
+                        rw, rh = cx2 - cx1, cy2 - cy1
+                        kpts = np.array(
+                            [[cx1 + lm.x * rw, cy1 + lm.y * rh, 0.98] for lm in lms],
+                            dtype=np.float32,
+                        )
+                        neural_name = None
+                        neural_score = 0.0
+                        if res.gestures and len(res.gestures) > 0 and len(res.gestures[0]) > 0:
+                            neural_name = res.gestures[0][0].category_name
+                            neural_score = float(res.gestures[0][0].score)
+                        tight_box = (
+                            max(0, int(np.min(kpts[:, 0]) - 18)),
+                            max(0, int(np.min(kpts[:, 1]) - 18)),
+                            min(w_full, int(np.max(kpts[:, 0]) + 18)),
+                            min(h_full, int(np.max(kpts[:, 1]) + 18)),
+                        )
+                        return kpts, tight_box, neural_name, neural_score
+                return None, None, None, 0.0
 
-        res_full = self.mp_recognizer.recognize(mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_full))
-        if res_full.hand_landmarks and len(res_full.hand_landmarks) > 0:
-            lms = res_full.hand_landmarks[0]
-            kpts = np.array(
-                [[lm.x * w_full, lm.y * h_full, 0.98] for lm in lms],
-                dtype=np.float32,
-            )
-            neural_name = None
-            neural_score = 0.0
-            if res_full.gestures and len(res_full.gestures) > 0 and len(res_full.gestures[0]) > 0:
-                neural_name = res_full.gestures[0][0].category_name
-                neural_score = float(res_full.gestures[0][0].score)
-            tight_box = (
-                max(0, int(np.min(kpts[:, 0]) - 18)),
-                max(0, int(np.min(kpts[:, 1]) - 18)),
-                min(w_full, int(np.max(kpts[:, 0]) + 18)),
-                min(h_full, int(np.max(kpts[:, 1]) + 18)),
-            )
-            return kpts, tight_box, neural_name, neural_score
+            res_full = self.mp_recognizer.recognize(mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_full))
+            if res_full.hand_landmarks and len(res_full.hand_landmarks) > 0:
+                lms = res_full.hand_landmarks[0]
+                kpts = np.array(
+                    [[lm.x * w_full, lm.y * h_full, 0.98] for lm in lms],
+                    dtype=np.float32,
+                )
+                neural_name = None
+                neural_score = 0.0
+                if res_full.gestures and len(res_full.gestures) > 0 and len(res_full.gestures[0]) > 0:
+                    neural_name = res_full.gestures[0][0].category_name
+                    neural_score = float(res_full.gestures[0][0].score)
+                tight_box = (
+                    max(0, int(np.min(kpts[:, 0]) - 18)),
+                    max(0, int(np.min(kpts[:, 1]) - 18)),
+                    min(w_full, int(np.max(kpts[:, 0]) + 18)),
+                    min(h_full, int(np.max(kpts[:, 1]) + 18)),
+                )
+                return kpts, tight_box, neural_name, neural_score
+        except Exception as exc:
+            now = time.monotonic()
+            if now - self._last_mp_warn_t >= 5.0:
+                self._last_mp_warn_t = now
+                print(f"[Cảnh báo] Lỗi MediaPipe 3D Refiner: {exc}")
         return None, None, None, 0.0
 
     def _run_yolo(
@@ -254,8 +301,11 @@ class YoloPoseHandDetector:
                     if best_idx < len(kpts_all) and kpts_all[best_idx].shape[0] >= 21:
                         yolo_kpts = self._anatomical_correct_keypoints(kpts_all[best_idx][:21])
                 return yolo_bbox, yolo_kpts, yolo_conf
-        except Exception:
-            pass
+        except Exception as exc:
+            now = time.monotonic()
+            if now - self._last_yolo_warn_t >= 5.0:
+                self._last_yolo_warn_t = now
+                print(f"[Cảnh báo] Lỗi suy luận YOLO: {exc}")
         return None, None, 0.0
 
     def detect(
@@ -317,6 +367,13 @@ class YoloPoseHandDetector:
 
         # Stage 3: Bộ lọc thích ứng One-Euro Filter (1€ Filter) chống rung tuyệt đối
         smoothed_kpts = self.kpt_smoother.update(final_kpts)
+
+        # Kiểm tra lại khung xương sau làm mượt (tránh trường hợp trộn tọa độ tạo ra khung xương lỗi)
+        if not self.analyzer.is_valid_hand_skeleton(final_bbox, smoothed_kpts):
+            self._prev_bbox = None
+            self.kpt_smoother.reset()
+            self.last_raw_kpts = None
+            return annotated, analyses
 
         analysis = self.analyzer.analyze(
             bbox=final_bbox,

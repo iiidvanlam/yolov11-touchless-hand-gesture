@@ -12,8 +12,16 @@ import os
 import shutil
 import sys
 
-os.environ.setdefault("YOLO_CONFIG_DIR", os.path.abspath("runs/ultralytics_config"))
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+os.environ.setdefault("YOLO_CONFIG_DIR", os.path.join(PROJECT_ROOT, "runs", "ultralytics_config"))
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
+
+def _resolve_path(path: str) -> str:
+    if os.path.isabs(path) or os.path.exists(path):
+        return path
+    return os.path.join(PROJECT_ROOT, path)
 
 
 def verify_gpu() -> str:
@@ -48,13 +56,13 @@ def main() -> None:
     parser.add_argument(
         "--model",
         type=str,
-        default="models/yolo11n_hand_pose_best.pt",
+        default=os.path.join(PROJECT_ROOT, "models", "yolo11n_hand_pose_best.pt"),
         help="Model khởi tạo: models/yolo11n_hand_pose_best.pt hoặc yolo11n-pose.pt",
     )
     parser.add_argument(
         "--dataset",
         type=str,
-        default="data/hand_pose_local.yaml",
+        default=os.path.join(PROJECT_ROOT, "data", "hand_pose_local.yaml"),
         help="File cấu hình dataset",
     )
     parser.add_argument("--epochs", type=int, default=15, help="Số vòng lặp huấn luyện (mặc định: 15)")
@@ -98,12 +106,17 @@ def main() -> None:
 
     KeypointLoss.forward = _stable_keypoint_loss_forward
 
-    model_path = args.model if os.path.exists(args.model) else "yolo11n-pose.pt"
+    requested_model = _resolve_path(args.model)
+    dataset_path = _resolve_path(args.dataset)
+    coco_fallback = _resolve_path("yolo11n-pose.pt")
+    model_path = requested_model if os.path.exists(requested_model) else coco_fallback
     print(f"\n[1/3] Đang khởi tạo mô hình {model_path}...")
     model = YOLO(model_path)
 
-    os.makedirs("models", exist_ok=True)
-    target_path = os.path.join("models", "yolo11n_hand_pose_best.pt")
+    models_dir = os.path.join(PROJECT_ROOT, "models")
+    os.makedirs(models_dir, exist_ok=True)
+    target_path = os.path.join(models_dir, "yolo11n_hand_pose_best.pt")
+    runs_pose_dir = os.path.join(PROJECT_ROOT, "runs", "pose")
 
     def _on_epoch_end_callback(trainer) -> None:
         gc.collect()
@@ -124,9 +137,9 @@ def main() -> None:
     model.add_callback("on_train_epoch_end", _on_epoch_end_callback)
     model.add_callback("on_fit_epoch_end", _on_epoch_end_callback)
 
-    print(f"[2/3] Bắt đầu huấn luyện 21-Keypoints trên '{args.dataset}' (device={device}, imgsz={args.imgsz})...")
+    print(f"[2/3] Bắt đầu huấn luyện 21-Keypoints trên '{dataset_path}' (device={device}, imgsz={args.imgsz})...")
     results = model.train(
-        data=args.dataset,
+        data=dataset_path,
         epochs=args.epochs,
         fraction=args.fraction,
         imgsz=args.imgsz,
@@ -136,7 +149,7 @@ def main() -> None:
         workers=args.workers,
         amp=True,
         cache=False,
-        project="runs/pose",
+        project=runs_pose_dir,
         name=args.name,
         exist_ok=True,
         cos_lr=True,
@@ -147,7 +160,7 @@ def main() -> None:
         plots=False,
     )
 
-    save_dir = str(getattr(results, "save_dir", os.path.join("runs", "pose", args.name)))
+    save_dir = str(getattr(results, "save_dir", os.path.join(runs_pose_dir, args.name)))
     best_weight_path = os.path.join(save_dir, "weights", "best.pt")
     if os.path.exists(best_weight_path):
         shutil.copy2(best_weight_path, target_path)

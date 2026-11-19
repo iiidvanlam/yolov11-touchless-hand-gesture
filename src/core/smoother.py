@@ -185,9 +185,9 @@ class CommandCooldown:
 
         now = time.perf_counter()
         cooldown = self.DEFAULT_COOLDOWNS.get(gesture, 1.0)
-        last_time = self.last_triggered.get(gesture, 0.0)
+        last_time = self.last_triggered.get(gesture)
 
-        if (now - last_time) >= cooldown:
+        if last_time is None or (now - last_time) >= cooldown:
             self.last_triggered[gesture] = now
             return True, 1.0
 

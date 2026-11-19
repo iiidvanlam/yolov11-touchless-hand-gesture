@@ -1,8 +1,12 @@
 from dataclasses import dataclass
 import math
 import os
+import tempfile
+import threading
 from typing import List, Optional, Tuple
 import numpy as np
+
+from src.core.paths import DEFAULT_ASL_DB_PATH, resolve_project_path
 
 
 # Định nghĩa các cặp nối khớp xương bàn tay (21 Keypoints chuẩn)
@@ -41,25 +45,131 @@ class HandPoseAnalyzer:
     Bộ phân tích 21 điểm khớp xương bàn tay kết hợp:
       1. Vector hình học bất biến tỷ lệ & góc khớp 3D/2D (21 Keypoints).
       2. Neural Gesture Classifier (Open_Palm, Closed_Fist, Victory, Thumb_Up, Thumb_Down, Pointing_Up, ILoveYou).
-      3. Cơ sở dữ liệu mẫu cá nhân hóa k-NN Cosine Similarity (`models/asl_keypoints_db.npz`).
+      3. Cơ sở dữ liệu mẫu cá nhân hóa 1-NN Euclidean (L2) (`models/asl_keypoints_db.npz`).
     """
 
-    def __init__(self, custom_keypoints_db_path: str = "models/asl_keypoints_db.npz"):
+    def __init__(self, custom_keypoints_db_path: str = DEFAULT_ASL_DB_PATH):
         self.custom_keypoints_db_path = custom_keypoints_db_path
+        self._db_lock = threading.Lock()
         self.sample_features: Optional[np.ndarray] = None
         self.sample_labels: Optional[np.ndarray] = None
         self.reload_custom_samples()
 
+    def _resolve_db_path(self) -> str:
+        if os.path.exists(self.custom_keypoints_db_path):
+            return self.custom_keypoints_db_path
+        if not os.path.isabs(self.custom_keypoints_db_path):
+            candidate = resolve_project_path(self.custom_keypoints_db_path)
+            if os.path.exists(candidate):
+                return candidate
+        return self.custom_keypoints_db_path
+
     def reload_custom_samples(self) -> None:
         """Tải tập mẫu 21-keypoints cá nhân hóa nếu người dùng đã lưu."""
-        if os.path.exists(self.custom_keypoints_db_path):
-            try:
-                data = np.load(self.custom_keypoints_db_path, allow_pickle=True)
-                self.sample_features = data["features"]
-                self.sample_labels = data["labels"]
-            except Exception:
+        with self._db_lock:
+            db_path = self._resolve_db_path()
+            if not os.path.exists(db_path):
                 self.sample_features = None
                 self.sample_labels = None
+                return
+            try:
+                with np.load(db_path, allow_pickle=True) as data:
+                    loaded_feats = np.asarray(data["features"], dtype=np.float32)
+                    loaded_labels = np.asarray(data["labels"])
+                if (
+                    loaded_feats.ndim == 2
+                    and loaded_feats.shape[1] == 42
+                    and loaded_labels.ndim == 1
+                    and len(loaded_feats) == len(loaded_labels)
+                    and np.isfinite(loaded_feats).all()
+                ):
+                    self.sample_features = loaded_feats
+                    self.sample_labels = loaded_labels
+                else:
+                    print(
+                        f"[Cảnh báo] Định dạng DB mẫu ASL '{db_path}' không hợp lệ; giữ nguyên dữ liệu hiện có."
+                    )
+            except Exception as exc:
+                print(f"[Cảnh báo] Không thể nạp DB mẫu ASL '{db_path}': {exc}")
+
+    def save_custom_sample(self, kpts: np.ndarray, label: str) -> int:
+        """Lưu thêm 1 mẫu 21-keypoints vào DB một cách an toàn đa luồng và trả về số mẫu của nhãn đó."""
+        feat = self.extract_normalized_features(kpts)
+        db_path = resolve_project_path(self.custom_keypoints_db_path)
+        db_dir = os.path.dirname(os.path.abspath(db_path)) or "."
+        os.makedirs(db_dir, exist_ok=True)
+        with self._db_lock:
+            base_feats = self.sample_features
+            base_labels = self.sample_labels
+            if (base_feats is None or base_labels is None) and os.path.exists(db_path):
+                try:
+                    with np.load(db_path, allow_pickle=True) as data:
+                        df = np.asarray(data["features"], dtype=np.float32)
+                        dl = np.asarray(data["labels"])
+                    if (
+                        df.ndim == 2
+                        and df.shape[1] == 42
+                        and dl.ndim == 1
+                        and len(df) == len(dl)
+                        and np.isfinite(df).all()
+                    ):
+                        base_feats = df
+                        base_labels = dl
+                except Exception:
+                    pass
+
+            if (
+                base_feats is not None
+                and base_labels is not None
+                and len(base_feats) > 0
+                and len(base_feats) == len(base_labels)
+            ):
+                new_feats = np.vstack([base_feats, feat]).astype(np.float32)
+                new_labels = np.append(base_labels, label)
+            else:
+                new_feats = np.array([feat], dtype=np.float32)
+                new_labels = np.array([label], dtype="<U16")
+
+            tmp_path: Optional[str] = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                    dir=db_dir,
+                    prefix=".tmp_asl_db_",
+                    suffix=".npz",
+                    delete=False,
+                ) as tmp_file:
+                    tmp_path = tmp_file.name
+                with open(tmp_path, "wb") as f:
+                    np.savez_compressed(f, features=new_feats, labels=new_labels)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp_path, db_path)
+                tmp_path = None
+            finally:
+                if tmp_path is not None and os.path.exists(tmp_path):
+                    try:
+                        os.remove(tmp_path)
+                    except OSError:
+                        pass
+
+            self.sample_features = new_feats
+            self.sample_labels = new_labels
+            return int(np.sum(new_labels == label))
+
+    @staticmethod
+    def _validate_keypoints_array(kpts: np.ndarray) -> np.ndarray:
+        """Kiểm tra mảng keypoints có kích thước (>=21, >=2) và tọa độ (x, y) hữu hạn."""
+        if kpts is None:
+            raise ValueError("Keypoints must not be None")
+        try:
+            arr = np.asarray(kpts, dtype=np.float32)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Invalid keypoints array: {exc}") from exc
+        if arr.ndim != 2 or arr.shape[0] < 21 or arr.shape[1] < 2:
+            raise ValueError(f"Expected keypoints shape (>=21, >=2), got {arr.shape}")
+        if not np.isfinite(arr[:21, :2]).all():
+            raise ValueError("Keypoints contain non-finite (NaN or Inf) coordinates")
+        return arr
 
     @staticmethod
     def _dist(p1: np.ndarray, p2: np.ndarray) -> float:
@@ -68,8 +178,8 @@ class HandPoseAnalyzer:
     @staticmethod
     def _angle_deg(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> float:
         """Tính góc (độ) tại đỉnh b tạo bởi tia ba và bc."""
-        ba = a[:2] - b[:2]
-        bc = c[:2] - b[:2]
+        ba = np.asarray(a[:2], dtype=np.float64) - np.asarray(b[:2], dtype=np.float64)
+        bc = np.asarray(c[:2], dtype=np.float64) - np.asarray(b[:2], dtype=np.float64)
         norm_ba = float(np.linalg.norm(ba))
         norm_bc = float(np.linalg.norm(bc))
         if norm_ba < 1e-5 or norm_bc < 1e-5:
@@ -85,7 +195,8 @@ class HandPoseAnalyzer:
         bất biến với vị trí và kích thước bàn tay xa/gần camera.
         Trả về vector đặc trưng 42 chiều (21 x 2).
         """
-        coords = kpts[:, :2].astype(np.float32)
+        arr = HandPoseAnalyzer._validate_keypoints_array(kpts)
+        coords = arr[:21, :2].astype(np.float32)
         wrist = coords[0].copy()
         rel = coords - wrist
         max_val = float(np.max(np.linalg.norm(rel, axis=1)))
@@ -98,32 +209,55 @@ class HandPoseAnalyzer:
         """
         Kiểm tra xem 21 điểm khớp xương có tạo thành cấu trúc bàn tay hợp lệ hay đang bị nhiễu/chưa hội tụ.
         """
-        if kpts is None or kpts.shape[0] < 21:
+        try:
+            arr = self._validate_keypoints_array(kpts)
+        except ValueError:
             return False
 
-        if kpts.shape[1] >= 3 and float(np.mean(kpts[:21, 2])) < 0.50:
+        if arr.shape[1] >= 3:
+            if not np.isfinite(arr[:21, 2]).all():
+                return False
+            if float(np.mean(arr[:21, 2])) < 0.50:
+                return False
+
+        if bbox is None or len(bbox) < 4:
             return False
+        try:
+            x1, y1, x2, y2 = float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])
+        except (TypeError, ValueError):
+            return False
+        if not (math.isfinite(x1) and math.isfinite(y1) and math.isfinite(x2) and math.isfinite(y2)):
+            return False
+        if x2 <= x1 or y2 <= y1:
+            return False
+        box_diag = math.hypot(x2 - x1, y2 - y1)
 
-        x1, y1, x2, y2 = bbox
-        box_diag = math.hypot(max(1, x2 - x1), max(1, y2 - y1))
-
-        xs = kpts[:21, 0]
-        ys = kpts[:21, 1]
+        xs = arr[:21, 0]
+        ys = arr[:21, 1]
         kpt_span = math.hypot(float(np.max(xs) - np.min(xs)), float(np.max(ys) - np.min(ys)))
         if kpt_span < 36.0 or kpt_span < 0.18 * box_diag:
             return False
 
-        palm_len = self._dist(kpts[0], kpts[9])
+        palm_len = self._dist(arr[0], arr[9])
         if palm_len < 18.0 or palm_len < 0.10 * box_diag:
             return False
 
-        d_5_9 = self._dist(kpts[5], kpts[9])
-        d_9_13 = self._dist(kpts[9], kpts[13])
-        d_13_17 = self._dist(kpts[13], kpts[17])
-        d_5_17 = self._dist(kpts[5], kpts[17])
+        d_5_9 = self._dist(arr[5], arr[9])
+        d_9_13 = self._dist(arr[9], arr[13])
+        d_13_17 = self._dist(arr[13], arr[17])
+        d_5_17 = self._dist(arr[5], arr[17])
         if d_5_17 < 0.15 * palm_len or d_5_17 > 2.2 * palm_len:
             return False
         if (d_5_9 + d_9_13 + d_13_17) / d_5_17 > 2.4:
+            return False
+
+        d_0_5 = self._dist(arr[0], arr[5])
+        d_0_17 = self._dist(arr[0], arr[17])
+        cross = abs(
+            float(arr[5][0] - arr[0][0]) * float(arr[17][1] - arr[0][1])
+            - float(arr[5][1] - arr[0][1]) * float(arr[17][0] - arr[0][0])
+        )
+        if cross <= 1e-3 or cross < 0.05 * d_0_5 * d_0_17:
             return False
 
         return True
@@ -133,6 +267,7 @@ class HandPoseAnalyzer:
         Kiểm tra 5 ngón tay đang mở (1) hay gập (0) dựa trên hình học góc khớp PIP/DIP và khoảng cách tới cổ tay/lòng bàn tay.
         Thứ tự: [Thumb (Cái), Index (Trỏ), Middle (Giữa), Ring (Áp út), Pinky (Út)]
         """
+        kpts = self._validate_keypoints_array(kpts)[:21]
         wrist = kpts[0]
         palm_center = (kpts[0][:2] + kpts[5][:2] + kpts[9][:2] + kpts[13][:2] + kpts[17][:2]) / 5.0
         palm_size = max(self._dist(wrist, kpts[9]), self._dist(kpts[5], kpts[17]), 1.0)
@@ -282,14 +417,23 @@ class HandPoseAnalyzer:
         Phân loại bảng chữ cái Ngôn ngữ Ký hiệu ASL (A-Z) + lệnh SPACE / DEL từ 21 keypoints.
         """
         # 1. Ưu tiên khớp trên tập mẫu 21-keypoints người dùng đã lưu (`models/asl_keypoints_db.npz`)
-        if self.sample_features is not None and len(self.sample_features) > 0:
+        with self._db_lock:
+            sample_features = self.sample_features
+            sample_labels = self.sample_labels
+
+        if (
+            sample_features is not None
+            and sample_labels is not None
+            and len(sample_features) > 0
+            and len(sample_features) == len(sample_labels)
+        ):
             feat = self.extract_normalized_features(kpts)
-            dists = np.linalg.norm(self.sample_features - feat, axis=1)
+            dists = np.linalg.norm(sample_features - feat, axis=1)
             min_idx = int(np.argmin(dists))
             min_dist = float(dists[min_idx])
             if min_dist < 0.38:
                 conf = float(np.clip(1.0 - min_dist, 0.72, 0.99))
-                return str(self.sample_labels[min_idx]), conf
+                return str(sample_labels[min_idx]), conf
 
         # 2. Bộ giải hình học 21 khớp + Neural Fusion
         wrist = kpts[0]

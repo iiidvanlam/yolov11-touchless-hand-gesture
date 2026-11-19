@@ -5,6 +5,8 @@ from typing import Optional
 import cv2
 import numpy as np
 
+from src.core.paths import DEFAULT_SCREENSHOTS_DIR
+
 
 # Mã phím ảo Windows (Virtual-Key Codes) cho điều khiển Media không cần cài thêm thư viện ngoài
 VK_VOLUME_MUTE = 0xAD
@@ -29,7 +31,8 @@ class WindowsMediaController:
       - Chụp ảnh màn hình nhanh.
     """
 
-    def __init__(self):
+    def __init__(self, screenshot_dir: Optional[str] = None):
+        self.screenshot_dir = screenshot_dir or DEFAULT_SCREENSHOTS_DIR
         self._audio_endpoint = None
         self.current_volume_percent: int = 50
         self.is_muted: bool = False
@@ -142,9 +145,9 @@ class WindowsMediaController:
 
     def take_screenshot(self, frame: Optional[np.ndarray] = None) -> str:
         """Lưu ảnh chụp nhanh vào thư mục screenshots/."""
-        os.makedirs("screenshots", exist_ok=True)
-        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        filepath = os.path.join("screenshots", f"capture_{ts}.png")
+        os.makedirs(self.screenshot_dir, exist_ok=True)
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+        filepath = os.path.join(self.screenshot_dir, f"capture_{ts}.png")
         try:
             import mss
             with mss.mss() as sct:
